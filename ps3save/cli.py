@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .pfd import PfdConfig, PfdError, PfdFile
@@ -29,6 +30,15 @@ def _config_from_args(args: argparse.Namespace) -> PfdConfig:
     if args.user_id is not None:
         kwargs["user_id"] = _parse_user_id(args.user_id)
     return PfdConfig(**kwargs)
+
+
+def _user_id_int(args: argparse.Namespace) -> int | None:
+    """The numeric local user slot, when --user-id was given as a plain integer
+    (PARAM.SFO's PARAMS blob stores it as a raw u32, unlike PfdConfig's 8-char
+    ASCII form, so an arbitrary 8-char --user-id has no SFO equivalent)."""
+    if args.user_id is not None and args.user_id.isdigit():
+        return int(args.user_id)
+    return None
 
 
 def _load(save_dir: Path, config: PfdConfig) -> PfdFile:
@@ -108,17 +118,29 @@ def cmd_resign(args: argparse.Namespace) -> int:
         shutil.copytree(source_dir, target_dir)
     else:
         target_dir = source_dir
-        backup_path = target_dir / "PARAM.PFD.bak"
         if not args.no_backup:
-            shutil.copyfile(target_dir / "PARAM.PFD", backup_path)
-            print(f"Backed up original to {backup_path}")
+            backup_dir = target_dir.parent / f"{target_dir.name}_backup_{datetime.now():%Y%m%d_%H%M%S}"
+            shutil.copytree(target_dir, backup_dir)
+            print(f"Backed up original folder to {backup_dir}")
+
+    sfo_path = target_dir / "PARAM.SFO"
+    if (args.account_id or args.user_id is not None) and sfo_path.exists():
+        sfo = SfoFile.load(sfo_path)
+        if args.account_id:
+            sfo.set_account_id(args.account_id)
+        uid_int = _user_id_int(args)
+        if uid_int is not None:
+            sfo.set_user_id(uid_int)
+        sfo.save(sfo_path)
 
     pf = _load(target_dir, config)
     pf.resign(target_dir)
     pf.save(target_dir / "PARAM.PFD")
 
-    print(f"Resigned {target_dir} to console_id={config.console_id.hex()} "
-          f"user_id={config.user_id.decode()}")
+    message = f"Resigned {target_dir} to console_id={config.console_id.hex()} user_id={config.user_id.decode()}"
+    if args.account_id:
+        message += f" account_id={args.account_id.lower()}"
+    print(message)
     return 0
 
 
@@ -141,10 +163,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_resign = sub.add_parser("resign", help="Rebind the save to a new console_id/user_id")
     add_common(p_resign)
+    p_resign.add_argument("--account-id", help="Target PSN account_id, 16 hex chars "
+                                                "(patches PARAM.SFO's ACCOUNT_ID + PARAMS)")
     p_resign.add_argument("--output", help="Write the resigned save to this new directory "
                                             "instead of modifying it in place")
     p_resign.add_argument("--no-backup", action="store_true",
-                           help="Don't keep a PARAM.PFD.bak when resigning in place")
+                           help="Don't keep a backup copy of the folder when resigning in place")
     p_resign.set_defaults(func=cmd_resign)
 
     return parser
