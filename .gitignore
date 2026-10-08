@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Real save files the user drops in for testing - personal data, not for the repo
+/test/
+
+# Backups created by resign (in-place mode)
+PARAM.PFD.bak
