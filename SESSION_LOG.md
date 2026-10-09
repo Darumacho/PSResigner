@@ -242,6 +242,165 @@ Modifié/ajouté depuis le dernier commit (pas encore commité — l'utilisateur
 - `ps3save/sfo.py` (écriture : `set_account_id`/`set_user_id`/`get_owner`/`save`)
 - `ps3save/profiles.py` (nouveau fichier)
 
+## Icône de l'application — fait (début de l'embellissement de l'appli)
+
+L'utilisateur a ajouté `resources/app_logo.png` et `resources/app_logo.ico`.
+
+- `ps3save/gui.py` : helper `_resource_path()` qui résout un chemin de ressource à la fois en lançant depuis les sources (racine du projet, deux niveaux au-dessus de `gui.py`) et une fois figé par PyInstaller (`sys._MEIPASS`). `App.__init__` charge `resources/app_logo.png` via `tk.PhotoImage` et l'applique avec `master.iconphoto(True, ...)` (icône de fenêtre + barre des tâches ; `True` = aussi utilisée par défaut pour les Toplevel comme la fenêtre Profiles). Référence gardée sur `self._app_icon` pour éviter le garbage-collection.
+- `PSResigner.spec` / `PSResignerCLI.spec` : `icon=['resources/app_logo.ico']` (icône de l'exe dans l'Explorateur/la barre des tâches) + `datas=[('resources/app_logo.png', 'resources')]` dans `PSResigner.spec` pour que le PNG soit bien extrait au runtime en mode onefile.
+
+Point d'attention soulevé en cours de route (dimensions non carrées observées dans le fichier) puis confirmé réglé par l'utilisateur : le `.ico` est correctement redimensionné. Affichage vérifié correct dans la barre de titre de l'exe buildé.
+
+## Thème clair/sombre — fait
+
+- `ps3save/theme.py` (nouveau) : palettes `LIGHT`/`DARK`, construites sur le thème ttk `"clam"` — le seul thème intégré à la fois cross-platform (contrairement à `"vista"`/`"winnative"`, Windows-only) et entièrement recolorable via `Style.configure` (contrairement à `"aqua"` sur Mac, qui ignore en grande partie les surcharges de couleur). `apply_ttk_style()` configure tous les styles ttk utilisés (`TFrame`, `TLabel`, `TLabelframe`, `TCheckbutton`, `TButton`, `TEntry`, `Treeview`, `TScrollbar`...). Les widgets tk "bruts" (non ttk) — `Text` du log, `Listbox` des Profiles — ne sont pas couverts par `ttk.Style` et sont coloriés à part via `style_text_widget()`/`style_listbox()`.
+- `ps3save/settings.py` (nouveau) : persistance JSON minimale (`~/.ps3save/settings.json`), même pattern que `profiles.py`. Stocke `dark_mode`.
+- `ps3save/gui.py` : checkbox "Dark mode" dans la rangée du dossier de save. `App.apply_theme()` applique le style + colore le log ; appelé au démarrage (valeur restaurée depuis les settings) et à chaque bascule (`on_toggle_theme()`, qui persiste aussi). `ProfilesDialog` applique le thème courant à son fond (Toplevel brut) et à sa Listbox à la construction.
+
+**Testé visuellement** (capture d'écran, fenêtre principale + Profiles, en clair et en sombre) : rendu cohérent et lisible dans les deux cas — fond, texte, champs, Treeview, boutons, Listbox tous recolorés correctement. Limite connue et acceptée : la barre de titre native (gérée par Windows, pas par Tk) reste claire même en mode sombre — nécessiterait un appel DWM (`DWMWA_USE_IMMERSIVE_DARK_MODE`) spécifique à Windows, pas fait pour l'instant (pas critique, et il faudrait une solution équivalente différente sur Mac). Testé aussi dans l'exe PyInstaller rebuildé (démarre bien en clair par défaut quand `settings.json` n'existe pas encore).
+
+## Premier test sur vraie console — succès, et mémorisation du dernier Console ID
+
+**L'utilisateur a confirmé que le resign fonctionne sur une vraie PS3.** Première validation "terrain" du projet.
+
+Question soulevée : peut-on préremplir automatiquement le Console ID depuis un SFO ? **Non** — expliqué à l'utilisateur que `console_id` n'est stocké nulle part en clair dans la save (ni PARAM.SFO, ni PARAM.PFD) : il n'intervient que comme clé HMAC pour calculer `FILE_CID`, et un HMAC est à sens unique (on ne peut pas remonter à la clé depuis le hash). C'est la propriété de sécurité recherchée par le binding console. Pour connaître son propre IDPS il faut un outil tournant sur la console elle-même (CFW, comme Apollo) ou l'avoir déjà récupéré par un autre moyen.
+
+Implémenté à la place : mémorisation automatique du **dernier Console ID utilisé** (choix simple retenu par l'utilisateur plutôt qu'une liste nommée "Mes consoles").
+- `ps3save/gui.py` : `console_id_var` préremplie au démarrage depuis `self._settings.get("last_console_id", "")` (même fichier `settings.json` que le thème). Nouvelle méthode `_remember_console_id()`, appelée après chaque resign réussi (en place ou vers un nouveau dossier), qui persiste la valeur.
+- Testé : scénario "session 1" (resign avec un ID) → "session 2" (nouvelle instance `App`) → le champ est bien prérempli avec la valeur de la session précédente.
+
+## Ajustements de layout GUI — faits
+
+Suite à un retour visuel de l'utilisateur (capture d'écran avec titre/sous-titre/account_id coupés dans le panneau "Save info") :
+- Colonne des valeurs du panneau "Save info" élargie (`minsize=220`, poids plus important que la colonne du tableau de fichiers) ; fenêtre principale élargie 720→780px pour compenser.
+- Colonnes du tableau de fichiers (`file_tree`) resserrées à 110px chacune (nom/taille) plutôt que leurs largeurs par défaut généreuses — testé que "Size (bytes)" reste lisible (ex. `2097152`) après resserrement.
+- Label "Trophy save" renommé en **"Trophy set file"** (clé du dict `info_labels` renommée en cohérence).
+
+## Console ID optionnel sur un Profil — fait
+
+Question de l'utilisateur : peut-on associer un Console ID à un Profil (en plus de User ID/Account ID) ? Choix retenu : champ **optionnel**, pour ne pas casser le flux existant (mémorisation globale du dernier Console ID utilisé) quand un profil ne gère qu'un seul compte sur une seule console — utile surtout pour qui jongle avec plusieurs consoles cibles.
+
+- `ps3save/profiles.py` : `Profile.console_id: str = ""` (32 car. hex ou vide), validé dans `validate()` comme les autres champs. Rétrocompatible : les anciens `profiles.json` sans ce champ se rechargent avec `console_id=""` par défaut (dataclass).
+- `ps3save/gui.py` : champ "Console ID (optional):" dans `ProfilesDialog`. `on_apply()` ne touche à `app.console_id_var` que si `p.console_id` est non vide — sinon le Console ID actuellement dans la fenêtre principale (ou mémorisé) reste inchangé.
+
+**Testé** : profil avec Console ID → appliquer écrase bien `console_id_var` ; profil sans Console ID → appliquer laisse `console_id_var` intact ; validation rejette correctement un Console ID de mauvaise longueur. Capture d'écran de la fenêtre Profiles avec le nouveau champ confirmée visuellement (layout propre).
+
+## Icônes sur les boutons — fait
+
+L'utilisateur a ajouté 6 PNG 64×64 dans `resources/` : `open-folder.png`, `profiles.png`, `load.png`, `save.png`, `add.png`, `delete.png`.
+
+- `ps3save/gui.py` : helper `_load_icon(name, scale=3)` (charge via `_resource_path`, réduit avec `.subsample(3,3)` — 64×64 est trop grand pour un bouton, pas de redimensionnement lissé possible en Tk pur sans Pillow mais le facteur 3 passe bien pour ces icônes simples/aplats). Icônes chargées une fois dans `App._icons` (fenêtre principale : `Browse...`→`open-folder.png`, `Profiles...`→`profiles.png`) et dans `ProfilesDialog._icons` (`Load From PARAM.SFO`→`load.png`, `Save Profile Changes`→`save.png`, `Add New Profile`→`add.png`, `Delete`→`delete.png`). Boutons avec `image=...` + `compound="left"` pour garder le texte. `Use in main window` volontairement sans icône (demande explicite).
+- `PSResigner.spec` : `datas` simplifié pour embarquer tout le dossier `resources/` (`[('resources', 'resources')]`) plutôt qu'un fichier nommé — plus pratique vu le nombre de ressources qui augmente.
+- Ajustement de layout : la fenêtre Profiles (520px) ne laissait plus de place pour "Delete" une fois les icônes ajoutées (boutons plus larges) → élargie à 640px.
+
+**Testé** : chargement des icônes confirmé par capture d'écran (fenêtre principale + Profiles, boutons avec icônes bien visibles, tailles cohérentes) ; revérifié aussi dans l'exe PyInstaller rebuildé (le dossier `resources/` complet est bien extrait au runtime en mode onefile).
+
+### Ajustement de taille : 22px → 48px → 16px
+
+L'utilisateur a demandé de passer les icônes à 48×48 pour réduire la taille des boutons (jugés "un peu grands" à l'implémentation initiale ~22px). `_load_icon()` généralisé pour viser une taille exacte via `zoom()`+`subsample()` (facteurs rationnels, pas seulement des diviseurs entiers de 64 — ex. 64→48 = zoom(3) puis subsample(4)).
+
+**Capture à l'appui, 48×48 donnait l'effet inverse** : boutons nettement plus grands qu'avant, pas plus petits. Remonté à l'utilisateur avec la capture avant d'aller plus loin plutôt que de deviner — confirmé : il voulait en fait **16×16** (le malentendu venait du fait qu'il raisonnait par rapport à la taille source 64×64 fournie, pas par rapport au rendu déjà réduit à ~22px). Recompilé et revérifié par capture à 16×16 : boutons compacts, icônes nettes. C'est la taille actuelle.
+
+## Étude de faisabilité : injection de cheats (patch de save)
+
+L'utilisateur a demandé d'étudier la faisabilité d'un **resigner PS4** (Save Wizard for PS4 existe déjà, service payant) puis d'un **système d'injection de cheats**.
+
+### PS4 — abandonné, verdict justifié par du code source réel
+
+Vérifié sur le code source d'Apollo PS4 (`bucanero/apollo-ps4`, le portage PS4 du projet dont on s'est déjà beaucoup inspiré) : **pas de clés crypto en dur dans le code**, contrairement à pfdtool/PS3. Le (dé)chiffrement réel passe par des appels noyau PS4 (`mountSave()`/`umountSave()`, wrappers de `sceSaveData*`) — c'est la PS4 elle-même, avec ses clés matérielles, qui fait le travail. Le README confirme : *"Standalone: no computer required, everything happens on the PS4."* Aucune fuite de clés équivalente à celle de PS3 (~2012) n'a eu lieu pour la PS4. **Conclusion : infaisable comme outil PC pur Python** — c'est très probablement pour ça que Save Wizard facture un service (fait tourner une vraie PS4 côté serveur). Seule alternative réaliste : Apollo Save Tool PS4 tourne déjà gratuitement sur une PS4 jailbreakée, ou alors développement homebrew PS4 (projet complètement différent, hors scope).
+
+### Cheats (patch de save) — faisable, confirmé par un exemple réel
+
+Clarifié avec l'utilisateur via `AskUserQuestion` : patch de save façon Apollo (valeurs connues patchées dans les fichiers, via base de codes communautaire) — **pas** d'injection mémoire live (qui nécessiterait une PS3 jailbreakée en réseau + CCAPI, projet totalement différent).
+
+Vérifié sur le code/les dépôts réels :
+- Format `.savepatch` (bucanero/apollo-lib) : blocs `[Nom du cheat]` + lignes de code hexadécimal façon GameGenie/CodeBreaker (type+adresse / valeur), ou dialectes alternatifs BSD (commandes set/write/search/...) et MicroPython pour les cas complexes.
+- Exemple réel récupéré pour **BCES01741** (God of War: Ascension, une de nos saves de test) :
+  ```
+  [Max Red Orbs]
+  80010004 00000324
+  28000030 49742400
+  ```
+- Base de données communautaire déjà existante et maintenue : [bucanero/apollo-patches](https://github.com/bucanero/apollo-patches) (fichiers `.savepatch` par ID de jeu, dont `BCES01741.savepatch` existe déjà) — pas besoin de construire notre propre base.
+- Référence pour le décodage du format GameGenie/CodeBreaker : crate Rust [`codebreaker`](https://docs.rs/codebreaker) (évite de rétro-ingénierier le bit-layout à l'aveugle).
+
+**Point d'architecture clé** : patcher un fichier de save invalide son hash `FILE` dans PARAM.PFD — un cheat appliqué doit donc être suivi du même rehash que `resign()` (identique au patch d'Account ID déjà en place). Pas de changement nécessaire dans `pfd.py` ; juste une étape de patch des octets *avant* `resign()`.
+
+## Réorganisation GUI en onglets — fait (étape 1, squelette)
+
+Suite à la discussion, l'utilisateur a proposé un onglet dédié aux cheats séparé du resign pur. Accord sur : `Save folder` + panneau `Save info` restent communs au-dessus (les deux onglets agissent sur la même save chargée) ; `Console ID`/`User ID`/`Account ID` restent des champs **partagés** (pas dupliqués par onglet) car appliquer un cheat nécessitera le même rehash que Resign, donc le même contexte d'identité.
+
+- `ps3save/gui.py` : `App` utilise maintenant un `ttk.Notebook` (`_build_notebook()`) avec deux onglets : **Resign** (contenu de l'ancien `_build_target_row()`/`_build_buttons()`, inchangé fonctionnellement) et **Cheats** (`_build_cheats_tab()`, placeholder "coming soon" pour l'instant — le moteur de patch lui-même n'est pas encore implémenté).
+- `ps3save/theme.py` : styles `TNotebook`/`TNotebook.Tab` ajoutés (onglet actif coloré avec `select_bg`), manquait pour le mode sombre.
+
+**Testé** : scénario resign complet (console+account id) rejoué après la réorganisation → toujours `check_file_hashes` tout `True`, donc pas de régression. Capture d'écran en clair (onglet Resign) et en sombre (onglet Cheats sélectionné programmatiquement, `notebook.select(1)`, les clics OS simulés via `PostMessage` n'étant pas fiables sur ces fenêtres Tk) : rendu cohérent dans les deux cas.
+
+## Base communautaire de cheats (bucanero/apollo-patches) — fait
+
+But : implémenter la récupération + l'affichage des cheats disponibles pour la save chargée, depuis la vraie base communautaire. L'application effective des patches (décodage des codes Save Wizard/GameGenie) reste **pour une prochaine étape** — volontairement pas fait maintenant, pour garder ce morceau testable isolément.
+
+### Recherche de la syntaxe réelle (avant d'écrire le parseur)
+
+`curl` fonctionne directement depuis Bash (accès réseau direct, pas besoin de passer par WebFetch) — bien plus fiable pour récupérer du texte exact, le résumé automatique de WebFetch tronque/paraphrase le code source au-delà de 125 caractères et s'est avéré peu fiable sur les extraits longs (a carrément halluciné une partie du détail du type de code `'8'` à une étape).
+
+- Récupéré le vrai fichier `PS3/BCES01741.savepatch` (God of War: Ascension, une de nos saves de test) et le code source de `bucanero/apollo-lib/source/patches.c` (fonction `apollo_apply_sw_code`) en entier via `curl` + lecture directe (pas de résumé IA) pour valider la syntaxe exacte.
+- Format confirmé :
+  - `; commentaire`
+  - `:<motif-dossier>\<motif-fichier>` — directive de section, s'applique à tous les cheats suivants jusqu'à la prochaine. Les deux côtés acceptent des wildcards (`*`). Le dossier peut être omis entièrement (`:DATA0.DAT` tout seul = n'importe quel dossier).
+  - `[Nom du cheat]` suivi de lignes de code `XXXXXXXX YYYYYYYY` (8 hex + espace + 8 hex).
+  - Un seul fichier peut cibler plusieurs dossiers de save différents pour le même jeu (ex. `-PROFDATA-*` et `-SYSDATA` dans le même `.savepatch`).
+
+### Robustesse testée sur 105 vrais fichiers (pas juste nos 2 exemples)
+
+Échantillon aléatoire de 105 fichiers `.savepatch` réels téléchargés (listing via l'API GitHub, graine fixée pour reproductibilité) et passés dans le parseur. Deux bugs réels trouvés et corrigés grâce à cet échantillon large (pas visibles sur nos 2 cas de test initiaux) :
+1. Directive sans dossier (`:DATA0.DAT`) mal interprétée comme *dossier* au lieu de *fichier* → corrigé (si pas de `\`, c'est le fichier, dossier = `*`).
+2. En-têtes organisationnels sans code associé (`[group:ICO]`, `[Group:...]`, `[INFO:...]`, parfois avant toute directive `:`) remontaient comme de fausses "cheats" vides → corrigé en filtrant les entrées sans ligne de code au moment du parsing (elles ne représentent rien d'applicable de toute façon). Au passage, découverte d'un cas réel de nom de cheat sans crochets (`Max WP/Money`, fichier `BLES00951.savepatch`) — le parseur accepte maintenant ce cas en repli (une ligne qui n'a pas la forme d'un code hex et qu'on rencontre hors cheat actif = nom de cheat implicite).
+
+Résultat final : **3755 cheats parsés sans erreur ni entrée invalide** sur les 105 fichiers testés.
+
+### Implémentation
+
+- `ps3save/cheats.py` (nouveau) : `extract_product_code()` (regex `[A-Z]{4}\d{5}` sur le nom du dossier de save), `fetch_savepatch()` (téléchargement HTTPS stdlib `urllib`, avec cache local sous `~/.ps3save/cheats_cache/`), `parse_savepatch()`, `CheatEntry` (avec `matches_folder()` et `matching_files()` via `fnmatch`), `list_cheats_for_save()` (combine tout : code produit → fetch → parse → filtre par dossier réellement chargé).
+- `ps3save/gui.py` : l'onglet Cheats (placeholder de l'étape précédente) affiche maintenant une vraie liste (Treeview Fichier(s) cible / Nom du cheat), un statut, et un bouton "Reload". Appelé automatiquement via `refresh_info()` à chaque chargement de save. Les fichiers multiples (`DAT-*` → 31 fichiers) sont résumés (`DAT-* (31 files)`) plutôt que listés en toutes lettres.
+
+**Testé** : bout en bout sur 3 vraies saves de test (God of War Ascension ×2 dossiers + Ninja Gaiden 3, ce dernier ayant lui aussi des cheats dans la base — découvert en testant) → listes correctes, capture d'écran confirmant le rendu. Vérifié aussi que `urllib`/HTTPS fonctionne bien une fois figé par PyInstaller (bundle de test séparé, pas de souci de certificats SSL comme ça peut arriver avec PyInstaller).
+
+## Décodeur/applicateur de codes Save Wizard — fait
+
+But : pouvoir réellement appliquer un cheat (pas juste le lister), en portant la logique de `apollo_apply_sw_code()` en Python.
+
+### Recherche complémentaire (endianness — point critique trouvé avant de coder)
+
+En creusant les fonctions utilitaires d'`apollo-lib` (`include/types.h`), découverte importante : Apollo utilise par défaut l'endianness **réelle de la machine sur laquelle il tourne** (`apollo_get_host_endianness()`), pas une valeur fixée. Comme Apollo tourne *sur* la PS3 elle-même (PowerPC, big-endian), ce défaut est **big-endian en pratique pour toute vraie save PS3** — un `.savepatch` peut le surcharger via des tags `[LE:]`/`[BE:]`, non rencontrés dans les 105 fichiers testés, donc pas gérés pour l'instant (documenté comme limitation connue plutôt que silencieusement ignorés).
+
+Ça simplifie énormément le portage Python : avec big-endian comme convention, écrire/chercher un code hex revient à prendre `bytes.fromhex(...)` directement, sans aucune gymnastique d'endianness (le code C fait cette gymnastique uniquement pour être indépendant de la machine hôte — un problème qu'on n'a pas en Python).
+
+### Implémentation
+
+`ps3save/cheats.py` : `apply_sw_codes(data, codes) -> bytes`, types supportés :
+- **0/1/2** : écriture 8/16/32-bit directe (`XTAAAAAA VVVVVVVV`, T=8 → relatif au pointeur).
+- **3** : incrément/décrément (nibble encode taille + add/sub + relatif pointeur ou non).
+- **8** : recherche d'un motif (N-ième occurrence, motif multi-lignes si > 4 octets) → positionne un pointeur interne.
+- **9** : manipulation du pointeur (lecture BE/LE à une adresse, +/-, set direct).
+
+Tout code d'un type non supporté (4/5/6/7/A-F, dialectes BSD/MicroPython) ou mal formé déclenche `UnsupportedCodeError` explicite plutôt que d'être ignoré ou mal appliqué silencieusement — pareil pour un pattern de recherche introuvable (ne touche jamais au fichier avant d'être sûr de pouvoir appliquer tout le code).
+
+**Validation de couverture réelle** (échantillon de 60 jeux, 2789 cheats) : **93.2% des cheats réels n'utilisent QUE les types déjà supportés**. Type `4` (multi-write) est le plus gros morceau restant (148 occurrences sur l'échantillon) si on veut aller plus loin un jour ; `5`/`6`/`7`/`D`/`F` sont anecdotiques (<25 occurrences cumulées).
+
+**Tests** :
+- Synthétique, un cas par type (0/1/2/3/8/9) + écriture relative au pointeur + erreurs (type inconnu, ligne mal formée, hors limites) — tous corrects.
+- Bout en bout réel : le cheat "Max Red Orbs" de `BCES01741` rejoué à la main (recherche `00 00 03 24` → écriture `49 74 24 00` à pointeur+0x30) sur une vraie save de test (motif injecté manuellement puisque cette save précise ne le contient pas naturellement) → octets corrects au bon offset, puis `check_file_hashes` repasse tout à `True` après le resign qui suit automatiquement.
+
+### UI (onglet Cheats)
+
+Sélectionner une ligne peuple un menu déroulant "Apply to file" (les fichiers réellement présents correspondant au motif, ex. `DAT-1` à `DAT-31`) ; bouton "Apply Cheat" qui patch le fichier choisi puis déclenche le même pipeline que `Resign` (réutilise `_do_resign`, `console_id`/`account_id`/`backup_var` déjà partagés — cf. décision prise avant de construire les onglets). Factorisé `_backup_save_dir()` pour éviter la 3ᵉ copie du même bloc de code (Resign en place + Apply Cheat).
+
+## Prochaine étape
+
+1. Autres tests sur console réelle (trophées, changement d'Account ID, **et maintenant un vrai cheat appliqué en conditions réelles**) — toujours en attente.
+2. Éventuellement le type `4` (multi-write) pour pousser la couverture au-delà de 93%.
+3. Suite de l'embellissement si besoin (barre de titre native sombre sous Windows).
+
 ## Références (à re-télécharger si besoin, non copiées dans ce repo)
 
 - https://github.com/bucanero/pfd_sfo_tools (pfdtool original de flatz, GPL) — fichiers clés : `pfdtool/src/pfd.c`, `pfd_internal.h`, `backend.c`, `util.c`

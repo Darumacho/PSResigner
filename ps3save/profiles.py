@@ -22,6 +22,7 @@ class Profile:
     name: str
     user_id: int = 0
     account_id: str = ""  # 16 hex chars, or "" if unset
+    console_id: str = ""  # 32 hex chars, or "" to leave the main window's Console ID untouched
 
     def validate(self) -> None:
         if not self.name.strip():
@@ -33,6 +34,11 @@ class Profile:
             or not all(c in "0123456789abcdefABCDEF" for c in self.account_id)
         ):
             raise ProfileError("Account ID must be 16 hex characters (or left empty)")
+        if self.console_id and (
+            len(self.console_id) != 32
+            or not all(c in "0123456789abcdefABCDEF" for c in self.console_id)
+        ):
+            raise ProfileError("Console ID must be 32 hex characters (or left empty)")
 
 
 def load_profiles(path: Path = PROFILES_PATH) -> list[Profile]:

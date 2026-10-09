@@ -7,17 +7,53 @@ runs the same way on Windows and macOS.
 
 from __future__ import annotations
 
+import math
 import shutil
+import sys
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import theme
+from .cheats import CheatEntry, CheatsError, UnsupportedCodeError, apply_sw_codes, list_cheats_for_save
 from .pfd import PfdConfig, PfdError, PfdFile
 from .profiles import Profile, ProfileError, load_profiles, save_profiles
+from .settings import load_settings, save_settings
 from .sfo import SfoError, SfoFile
 
 HASH_NAMES = {0: "FILE", 1: "FILE_CID", 2: "FILE_DHK_CID2", 3: "FILE_AID_UID"}
+
+
+def _resource_path(*parts: str) -> Path:
+    """Resolve a bundled resource both running from source (project root is
+    two levels up from this file) and frozen by PyInstaller (extracted
+    under sys._MEIPASS -- see the `datas` entry in PSResigner.spec)."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return base.joinpath(*parts)
+
+
+def _load_icon(name: str, target_size: int = 16) -> tk.PhotoImage | None:
+    """Load a button icon from resources/ and rescale it to target_size x
+    target_size. tkinter's PhotoImage only scales by integer factors
+    (zoom = multiply, subsample = divide), so an arbitrary ratio like
+    64 -> 48 (3/4) is done as zoom(3) then subsample(4)."""
+    path = _resource_path("resources", name)
+    if not path.exists():
+        return None
+    try:
+        img = tk.PhotoImage(file=str(path))
+    except tk.TclError:
+        return None
+    original = img.width()
+    if original and original != target_size:
+        g = math.gcd(target_size, original)
+        zoom_factor, sub_factor = target_size // g, original // g
+        if zoom_factor > 1:
+            img = img.zoom(zoom_factor, zoom_factor)
+        if sub_factor > 1:
+            img = img.subsample(sub_factor, sub_factor)
+    return img
 
 
 def _parse_user_id(value: str) -> bytes:
@@ -35,22 +71,54 @@ class App(ttk.Frame):
         super().__init__(master, padding=10)
         self.master = master
         master.title("PSResigner")
-        master.geometry("720x560")
+        master.geometry("780x720")
+
+        icon_path = _resource_path("resources", "app_logo.png")
+        if icon_path.exists():
+            try:
+                self._app_icon = tk.PhotoImage(file=str(icon_path))
+                master.iconphoto(True, self._app_icon)
+            except tk.TclError:
+                pass
         self.grid(row=0, column=0, sticky="nsew")
         master.rowconfigure(0, weight=1)
         master.columnconfigure(0, weight=1)
 
         self.save_dir: Path | None = None
         self.pf: PfdFile | None = None
+        self._icons = {
+            name: icon
+            for name in ("open-folder.png", "profiles.png")
+            if (icon := _load_icon(name)) is not None
+        }
+        self._settings = load_settings()
+        self.dark_var = tk.BooleanVar(value=bool(self._settings.get("dark_mode", False)))
 
         self._build_folder_row()
         self._build_info_panel()
-        self._build_target_row()
-        self._build_buttons()
+        self._build_notebook()
         self._build_log()
 
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(3, weight=1)
         self.columnconfigure(0, weight=1)
+
+        self.apply_theme()
+
+    # ---- theme ---------------------------------------------------------
+
+    def apply_theme(self) -> None:
+        dark = self.dark_var.get()
+        theme.apply_ttk_style(self.master, dark)
+        theme.style_text_widget(self.log_text, dark)
+
+    def on_toggle_theme(self) -> None:
+        self.apply_theme()
+        self._settings["dark_mode"] = self.dark_var.get()
+        save_settings(self._settings)
+
+    def _remember_console_id(self, console_id_hex: str) -> None:
+        self._settings["last_console_id"] = console_id_hex
+        save_settings(self._settings)
 
     # ---- layout ---------------------------------------------------
 
@@ -62,15 +130,21 @@ class App(ttk.Frame):
         ttk.Label(row, text="Save folder:").grid(row=0, column=0, sticky="w")
         self.folder_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.folder_var).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(row, text="Browse...", command=self.on_browse).grid(row=0, column=2)
+        ttk.Button(
+            row, text="Browse...", image=self._icons.get("open-folder.png"), compound="left",
+            command=self.on_browse,
+        ).grid(row=0, column=2)
+        ttk.Checkbutton(
+            row, text="Dark mode", variable=self.dark_var, command=self.on_toggle_theme
+        ).grid(row=0, column=3, padx=(12, 0))
 
     def _build_info_panel(self) -> None:
         box = ttk.LabelFrame(self, text="Save info")
         box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        box.columnconfigure(1, weight=1)
+        box.columnconfigure(1, weight=2, minsize=220)
 
         self.info_labels: dict[str, tk.StringVar] = {}
-        for i, field in enumerate(["Title", "Sub-title", "PFD version", "Trophy save", "Account ID"]):
+        for i, field in enumerate(["Title", "Sub-title", "PFD version", "Trophy set file", "Account ID"]):
             ttk.Label(box, text=f"{field}:").grid(row=i, column=0, sticky="w", padx=(4, 8))
             var = tk.StringVar(value="-")
             ttk.Label(box, textvariable=var).grid(row=i, column=1, sticky="w")
@@ -80,7 +154,8 @@ class App(ttk.Frame):
         self.file_tree = ttk.Treeview(box, columns=columns, show="headings", height=6)
         self.file_tree.heading("name", text="File")
         self.file_tree.heading("size", text="Size (bytes)")
-        self.file_tree.column("size", width=120, anchor="e")
+        self.file_tree.column("name", width=110)
+        self.file_tree.column("size", width=110, anchor="e")
         self.file_tree.grid(row=0, column=2, rowspan=5, sticky="nsew", padx=(12, 4))
         box.columnconfigure(2, weight=1)
 
@@ -88,42 +163,186 @@ class App(ttk.Frame):
         self.icon_label = ttk.Label(box)
         self.icon_label.grid(row=0, column=3, rowspan=5, sticky="n", padx=(4, 4))
 
-    def _build_target_row(self) -> None:
-        row = ttk.LabelFrame(self, text="Target identity")
-        row.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+    def _build_notebook(self) -> None:
+        self.notebook = ttk.Notebook(self)
+        self.notebook.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
-        ttk.Label(row, text="Console ID (32 hex chars):").grid(row=0, column=0, sticky="w", padx=4)
-        self.console_id_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.console_id_var, width=40).grid(row=0, column=1, padx=6, pady=4)
+        resign_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
+        cheats_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
+        self.notebook.add(resign_tab, text="Resign")
+        self.notebook.add(cheats_tab, text="Cheats")
 
-        ttk.Label(row, text="User ID:").grid(row=0, column=2, sticky="w", padx=4)
+        self._build_resign_tab(resign_tab)
+        self._build_cheats_tab(cheats_tab)
+
+    def _build_resign_tab(self, parent: ttk.Frame) -> None:
+        identity = ttk.LabelFrame(parent, text="Target identity")
+        identity.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(identity, text="Console ID (32 hex chars):").grid(row=0, column=0, sticky="w", padx=4)
+        self.console_id_var = tk.StringVar(value=self._settings.get("last_console_id", ""))
+        ttk.Entry(identity, textvariable=self.console_id_var, width=40).grid(row=0, column=1, padx=6, pady=4)
+
+        ttk.Label(identity, text="User ID:").grid(row=0, column=2, sticky="w", padx=4)
         self.user_id_var = tk.StringVar(value="1")
-        ttk.Entry(row, textvariable=self.user_id_var, width=12).grid(row=0, column=3, padx=6)
+        ttk.Entry(identity, textvariable=self.user_id_var, width=12).grid(row=0, column=3, padx=6)
 
-        ttk.Label(row, text="Account ID (16 hex chars):").grid(row=1, column=0, sticky="w", padx=4)
+        ttk.Label(identity, text="Account ID (16 hex chars):").grid(row=1, column=0, sticky="w", padx=4)
         self.account_id_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.account_id_var, width=40).grid(row=1, column=1, padx=6, pady=(0, 4))
+        ttk.Entry(identity, textvariable=self.account_id_var, width=40).grid(row=1, column=1, padx=6, pady=(0, 4))
 
-        ttk.Button(row, text="Profiles...", command=self.on_open_profiles).grid(
-            row=1, column=2, columnspan=2, sticky="e", padx=6
-        )
+        ttk.Button(
+            identity, text="Profiles...", image=self._icons.get("profiles.png"), compound="left",
+            command=self.on_open_profiles,
+        ).grid(row=1, column=2, columnspan=2, sticky="e", padx=6)
 
-    def _build_buttons(self) -> None:
-        row = ttk.Frame(self)
-        row.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(row, text="Check hashes", command=self.on_check).pack(side="left", padx=(0, 6))
-        ttk.Button(row, text="Resign (in place)", command=self.on_resign_in_place).pack(side="left", padx=6)
-        ttk.Button(row, text="Resign to new folder...", command=self.on_resign_to_new_folder).pack(
+        buttons = ttk.Frame(parent)
+        buttons.grid(row=1, column=0, sticky="ew")
+        ttk.Button(buttons, text="Check hashes", command=self.on_check).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Resign (in place)", command=self.on_resign_in_place).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Resign to new folder...", command=self.on_resign_to_new_folder).pack(
             side="left", padx=6
         )
         self.backup_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            row, text="Backup save folder before resigning in place", variable=self.backup_var
+            buttons, text="Backup save folder before resigning in place", variable=self.backup_var
         ).pack(side="left", padx=(12, 0))
+
+    def _build_cheats_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(parent)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.cheats_status_var = tk.StringVar(value="Load a save to see available cheats.")
+        ttk.Label(top, textvariable=self.cheats_status_var).pack(side="left")
+        ttk.Button(top, text="Reload", command=self.refresh_cheats).pack(side="right")
+
+        columns = ("file", "name")
+        self.cheats_tree = ttk.Treeview(parent, columns=columns, show="headings", height=10)
+        self.cheats_tree.heading("file", text="Target file(s)")
+        self.cheats_tree.heading("name", text="Cheat")
+        self.cheats_tree.column("file", width=160)
+        self.cheats_tree.grid(row=1, column=0, sticky="nsew")
+        self.cheats_tree.bind("<<TreeviewSelect>>", self._on_cheat_select)
+        self._cheat_rows: dict[str, tuple[CheatEntry, list[str]]] = {}
+
+        apply_row = ttk.Frame(parent)
+        apply_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(apply_row, text="Apply to file:").pack(side="left")
+        self.cheat_target_file_var = tk.StringVar()
+        self.cheat_target_combo = ttk.Combobox(
+            apply_row, textvariable=self.cheat_target_file_var, state="readonly", width=20
+        )
+        self.cheat_target_combo.pack(side="left", padx=6)
+        ttk.Button(apply_row, text="Apply Cheat", command=self.on_apply_cheat).pack(side="left", padx=6)
+
+        ttk.Label(
+            parent,
+            text="From the community database (bucanero/apollo-patches). Supports Save Wizard "
+                 "code types 0/1/2/3/8/9 (covers most real codes); anything else is rejected "
+                 "rather than mis-applied.",
+            wraplength=680,
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    def refresh_cheats(self) -> None:
+        self.cheats_tree.delete(*self.cheats_tree.get_children())
+        self._cheat_rows = {}
+        self.cheat_target_combo.configure(values=())
+        self.cheat_target_file_var.set("")
+        if self.save_dir is None:
+            self.cheats_status_var.set("Load a save to see available cheats.")
+            return
+
+        self.cheats_status_var.set("Loading cheats...")
+        self.cheats_tree.update_idletasks()
+        try:
+            entries = list_cheats_for_save(self.save_dir)
+        except CheatsError as e:
+            self.cheats_status_var.set(str(e))
+            return
+
+        if not entries:
+            self.cheats_status_var.set(f"No cheats found for {self.save_dir.name}.")
+            return
+
+        self.cheats_status_var.set(f"{len(entries)} cheat(s) available for {self.save_dir.name}")
+        for i, entry in enumerate(entries):
+            files = entry.matching_files(self.save_dir)
+            if len(files) > 3:
+                file_display = f"{entry.file_pattern} ({len(files)} files)"
+            else:
+                file_display = ", ".join(files) or entry.file_pattern
+            iid = str(i)
+            self.cheats_tree.insert("", "end", iid=iid, values=(file_display, entry.name))
+            self._cheat_rows[iid] = (entry, files)
+
+    def _on_cheat_select(self, _event) -> None:
+        sel = self.cheats_tree.selection()
+        if not sel:
+            return
+        _entry, files = self._cheat_rows[sel[0]]
+        self.cheat_target_combo.configure(values=files)
+        self.cheat_target_file_var.set(files[0] if files else "")
+
+    def on_apply_cheat(self) -> None:
+        if self.save_dir is None:
+            messagebox.showwarning("No folder", "Select a save folder first.")
+            return
+        sel = self.cheats_tree.selection()
+        if not sel:
+            messagebox.showwarning("No cheat selected", "Select a cheat first.")
+            return
+        entry, _files = self._cheat_rows[sel[0]]
+        target_name = self.cheat_target_file_var.get()
+        if not target_name:
+            messagebox.showwarning("No target file", "Choose which file to apply this cheat to.")
+            return
+
+        config = self.current_config()
+        if config is None:
+            return
+        if not self.console_id_var.get().strip():
+            messagebox.showwarning(
+                "Missing console ID",
+                "Enter a target console ID first (patching a file invalidates its hash, so the "
+                "save needs re-signing right after).",
+            )
+            return
+
+        do_backup = self.backup_var.get()
+        if not messagebox.askyesno(
+            "Apply cheat",
+            f"This will patch '{target_name}' in:\n{self.save_dir}\nand re-sign the save.\n\n"
+            + ("A full backup copy of the folder will be kept. Continue?"
+               if do_backup else
+               "No backup will be made (checkbox unticked). Continue?"),
+        ):
+            return
+
+        target_path = self.save_dir / target_name
+        backup_dir = None
+        try:
+            if do_backup:
+                backup_dir = self._backup_save_dir()
+            patched = apply_sw_codes(target_path.read_bytes(), entry.codes)
+            target_path.write_bytes(patched)
+            self._do_resign(self.save_dir, config)
+        except (UnsupportedCodeError, PfdError, SfoError, OSError) as e:
+            messagebox.showerror("Apply cheat failed", str(e))
+            return
+
+        self._remember_console_id(config.console_id.hex())
+        self.clear_log()
+        if backup_dir is not None:
+            self.log(f"Backed up original folder to {backup_dir}")
+        self.log(f"Applied cheat '{entry.name}' to {target_name}, re-signed to "
+                  f"console_id={config.console_id.hex()} user_id={config.user_id.decode()}")
+        self.refresh_info()
 
     def _build_log(self) -> None:
         box = ttk.LabelFrame(self, text="Log")
-        box.grid(row=4, column=0, sticky="nsew")
+        box.grid(row=3, column=0, sticky="nsew")
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
@@ -165,6 +384,7 @@ class App(ttk.Frame):
         return PfdConfig(**kwargs)
 
     def refresh_info(self) -> None:
+        self.refresh_cheats()
         for var in self.info_labels.values():
             var.set("-")
         self.file_tree.delete(*self.file_tree.get_children())
@@ -205,7 +425,7 @@ class App(ttk.Frame):
             return
 
         self.info_labels["PFD version"].set(str(self.pf.version))
-        self.info_labels["Trophy save"].set("Yes" if self.pf.is_trophy else "No")
+        self.info_labels["Trophy set file"].set("Yes" if self.pf.is_trophy else "No")
         for entry in self.pf.entries[: self.pf.num_used]:
             self.file_tree.insert("", "end", values=(entry.file_name, entry.file_size))
 
@@ -255,6 +475,11 @@ class App(ttk.Frame):
             self.log(f"  {file_name}: " + " ".join(parts))
         self.log("Result: all checkable hashes OK" if all_ok else "Result: one or more hash mismatches")
 
+    def _backup_save_dir(self) -> Path:
+        backup_dir = self.save_dir.parent / f"{self.save_dir.name}_backup_{datetime.now():%Y%m%d_%H%M%S}"
+        shutil.copytree(self.save_dir, backup_dir)
+        return backup_dir
+
     def _do_resign(self, target_dir: Path, config: PfdConfig) -> None:
         account_id = self.account_id_var.get().strip()
         user_id_str = self.user_id_var.get().strip()
@@ -295,13 +520,13 @@ class App(ttk.Frame):
         backup_dir = None
         try:
             if do_backup:
-                backup_dir = self.save_dir.parent / f"{self.save_dir.name}_backup_{datetime.now():%Y%m%d_%H%M%S}"
-                shutil.copytree(self.save_dir, backup_dir)
+                backup_dir = self._backup_save_dir()
             self._do_resign(self.save_dir, config)
         except (PfdError, SfoError, OSError) as e:
             messagebox.showerror("Resign failed", str(e))
             return
 
+        self._remember_console_id(config.console_id.hex())
         self.clear_log()
         if backup_dir is not None:
             self.log(f"Backed up original folder to {backup_dir}")
@@ -337,6 +562,7 @@ class App(ttk.Frame):
             messagebox.showerror("Resign failed", str(e))
             return
 
+        self._remember_console_id(config.console_id.hex())
         self.clear_log()
         self.log(f"Resigned copy written to {target_dir}")
         message = f"console_id={config.console_id.hex()} user_id={config.user_id.decode()}"
@@ -357,7 +583,7 @@ class ProfilesDialog(tk.Toplevel):
         super().__init__(app.master)
         self.app = app
         self.title("Profiles")
-        self.geometry("520x380")
+        self.geometry("640x410")
         self.transient(app.master)
 
         try:
@@ -368,6 +594,8 @@ class ProfilesDialog(tk.Toplevel):
 
         self._build()
         self._refresh_list()
+        self.configure(background=theme.palette(app.dark_var.get())["bg"])
+        theme.style_listbox(self.listbox, app.dark_var.get())
 
     def _build(self) -> None:
         self.listbox = tk.Listbox(self, height=10)
@@ -391,16 +619,34 @@ class ProfilesDialog(tk.Toplevel):
         self.account_id_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.account_id_var).grid(row=2, column=1, sticky="ew", padx=6, pady=2)
 
+        ttk.Label(form, text="Console ID (optional):").grid(row=3, column=0, sticky="w")
+        self.console_id_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.console_id_var).grid(row=3, column=1, sticky="ew", padx=6, pady=2)
+
+        self._icons = {
+            name: icon
+            for name in ("load.png", "save.png", "add.png", "delete.png")
+            if (icon := _load_icon(name)) is not None
+        }
+
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=10, pady=(4, 10))
-        ttk.Button(buttons, text="Load From PARAM.SFO", command=self.on_load_from_sfo).pack(
-            side="left", padx=(0, 6)
-        )
-        ttk.Button(buttons, text="Save Profile Changes", command=self.on_save_changes).pack(
-            side="left", padx=6
-        )
-        ttk.Button(buttons, text="Add New Profile", command=self.on_add_new).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Delete", command=self.on_delete).pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="Load From PARAM.SFO", image=self._icons.get("load.png"), compound="left",
+            command=self.on_load_from_sfo,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            buttons, text="Save Profile Changes", image=self._icons.get("save.png"), compound="left",
+            command=self.on_save_changes,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="Add New Profile", image=self._icons.get("add.png"), compound="left",
+            command=self.on_add_new,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="Delete", image=self._icons.get("delete.png"), compound="left",
+            command=self.on_delete,
+        ).pack(side="left", padx=6)
 
         apply_row = ttk.Frame(self)
         apply_row.pack(fill="x", padx=10, pady=(0, 10))
@@ -426,6 +672,7 @@ class ProfilesDialog(tk.Toplevel):
         self.name_var.set(p.name)
         self.user_id_var.set(str(p.user_id))
         self.account_id_var.set(p.account_id)
+        self.console_id_var.set(p.console_id)
 
     def _fields_as_profile(self) -> Profile | None:
         try:
@@ -437,6 +684,7 @@ class ProfilesDialog(tk.Toplevel):
             name=self.name_var.get().strip(),
             user_id=user_id,
             account_id=self.account_id_var.get().strip().lower(),
+            console_id=self.console_id_var.get().strip().lower(),
         )
         try:
             profile.validate()
@@ -509,7 +757,11 @@ class ProfilesDialog(tk.Toplevel):
         p = self.profiles[idx]
         self.app.user_id_var.set(str(p.user_id))
         self.app.account_id_var.set(p.account_id)
-        self.app.log(f"Applied profile '{p.name}' (user_id={p.user_id}, account_id={p.account_id})")
+        message = f"Applied profile '{p.name}' (user_id={p.user_id}, account_id={p.account_id}"
+        if p.console_id:
+            self.app.console_id_var.set(p.console_id)
+            message += f", console_id={p.console_id}"
+        self.app.log(message + ")")
 
 
 def main() -> None:
