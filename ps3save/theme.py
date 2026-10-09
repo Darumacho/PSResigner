@@ -22,6 +22,9 @@ LIGHT = {
     "select_fg": "#ffffff",
     "border": "#a0a0a0",
     "trough": "#d9d9d9",
+    "accent": "#0070cc",
+    "accent_active": "#0059a3",
+    "accent_fg": "#ffffff",
 }
 
 DARK = {
@@ -33,6 +36,9 @@ DARK = {
     "select_fg": "#ffffff",
     "border": "#555555",
     "trough": "#1e1e1e",
+    "accent": "#3b82f6",
+    "accent_active": "#5b94f7",
+    "accent_fg": "#ffffff",
 }
 
 
@@ -58,6 +64,14 @@ def apply_ttk_style(root: tk.Tk, dark: bool) -> None:
         "TButton",
         background=[("active", c["select_bg"]), ("pressed", c["select_bg"])],
         foreground=[("active", c["select_fg"]), ("pressed", c["select_fg"])],
+    )
+
+    style.configure("Accent.TButton", background=c["accent"], foreground=c["accent_fg"],
+                     bordercolor=c["accent"])
+    style.map(
+        "Accent.TButton",
+        background=[("active", c["accent_active"]), ("pressed", c["accent_active"])],
+        foreground=[("active", c["accent_fg"]), ("pressed", c["accent_fg"])],
     )
 
     style.configure("TEntry", fieldbackground=c["entry_bg"], foreground=c["entry_fg"],

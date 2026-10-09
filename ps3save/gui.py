@@ -15,8 +15,15 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import theme
-from .cheats import CheatEntry, CheatsError, UnsupportedCodeError, apply_sw_codes, list_cheats_for_save
+from . import games_conf, theme
+from .cheats import (
+    CheatEntry,
+    CheatsError,
+    UnsupportedCodeError,
+    apply_sw_codes,
+    extract_product_code,
+    list_cheats_for_save,
+)
 from .pfd import PfdConfig, PfdError, PfdFile
 from .profiles import Profile, ProfileError, load_profiles, save_profiles
 from .settings import load_settings, save_settings
@@ -199,10 +206,13 @@ class App(ttk.Frame):
         buttons = ttk.Frame(parent)
         buttons.grid(row=1, column=0, sticky="ew")
         ttk.Button(buttons, text="Check hashes", command=self.on_check).pack(side="left", padx=(0, 6))
-        ttk.Button(buttons, text="Resign (in place)", command=self.on_resign_in_place).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Resign to new folder...", command=self.on_resign_to_new_folder).pack(
-            side="left", padx=6
-        )
+        ttk.Button(
+            buttons, text="Resign (in place)", style="Accent.TButton", command=self.on_resign_in_place
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            buttons, text="Resign to new folder...", style="Accent.TButton",
+            command=self.on_resign_to_new_folder,
+        ).pack(side="left", padx=6)
         self.backup_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             buttons, text="Backup save folder before resigning in place", variable=self.backup_var
@@ -235,7 +245,9 @@ class App(ttk.Frame):
             apply_row, textvariable=self.cheat_target_file_var, state="readonly", width=20
         )
         self.cheat_target_combo.pack(side="left", padx=6)
-        ttk.Button(apply_row, text="Apply Cheat", command=self.on_apply_cheat).pack(side="left", padx=6)
+        ttk.Button(
+            apply_row, text="Apply Cheat", style="Accent.TButton", command=self.on_apply_cheat
+        ).pack(side="left", padx=6)
 
         ttk.Label(
             parent,
@@ -266,16 +278,27 @@ class App(ttk.Frame):
             self.cheats_status_var.set(f"No cheats found for {self.save_dir.name}.")
             return
 
-        self.cheats_status_var.set(f"{len(entries)} cheat(s) available for {self.save_dir.name}")
+        unsafe_count = 0
         for i, entry in enumerate(entries):
             files = entry.matching_files(self.save_dir)
             if len(files) > 3:
                 file_display = f"{entry.file_pattern} ({len(files)} files)"
             else:
                 file_display = ", ".join(files) or entry.file_pattern
+
+            safe = self.pf is not None and any(self.pf.can_rehash_file(f) for f in files)
+            if not safe:
+                unsafe_count += 1
+                file_display = f"⚠ {file_display}"
+
             iid = str(i)
             self.cheats_tree.insert("", "end", iid=iid, values=(file_display, entry.name))
             self._cheat_rows[iid] = (entry, files)
+
+        status = f"{len(entries)} cheat(s) available for {self.save_dir.name}"
+        if unsafe_count:
+            status += f" ({unsafe_count} can't be safely applied -- see ⚠)"
+        self.cheats_status_var.set(status)
 
     def _on_cheat_select(self, _event) -> None:
         sel = self.cheats_tree.selection()
@@ -297,6 +320,16 @@ class App(ttk.Frame):
         target_name = self.cheat_target_file_var.get()
         if not target_name:
             messagebox.showwarning("No target file", "Choose which file to apply this cheat to.")
+            return
+        if self.pf is None or not self.pf.can_rehash_file(target_name):
+            messagebox.showerror(
+                "Can't safely patch this file",
+                f"'{target_name}' isn't PARAM.SFO or one of the fixed trophy files -- it needs a "
+                "per-game \"secure file ID\" key this tool doesn't have yet. Patching it would "
+                "leave its stored hash pointing at the OLD content, and the PS3 rejects that as "
+                "corrupted data (error 80029207) instead of accepting the cheat. Refusing to "
+                "apply this one.",
+            )
             return
 
         config = self.current_config()
@@ -365,8 +398,29 @@ class App(ttk.Frame):
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
+    def _games_conf_kwargs(self) -> dict:
+        """secure_file_id_lookup (+ disc_hash_key override) for the loaded
+        save's game, if games.conf has an entry for it -- best-effort, {}
+        on any lookup failure so callers just fall back to today's
+        PARAM.SFO/TROP*.DAT-only behavior."""
+        if self.save_dir is None:
+            return {}
+        product_code = extract_product_code(self.save_dir.name)
+        if product_code is None:
+            return {}
+        try:
+            entry = games_conf.lookup(product_code)
+        except games_conf.GamesConfError:
+            return {}
+        if entry is None:
+            return {}
+        kwargs: dict = {"secure_file_id_lookup": entry.secure_file_id_for}
+        if entry.disc_hash_key is not None:
+            kwargs["disc_hash_key"] = entry.disc_hash_key
+        return kwargs
+
     def current_config(self) -> PfdConfig | None:
-        kwargs = {}
+        kwargs = self._games_conf_kwargs()
         console_hex = self.console_id_var.get().strip()
         if console_hex:
             try:
@@ -384,7 +438,6 @@ class App(ttk.Frame):
         return PfdConfig(**kwargs)
 
     def refresh_info(self) -> None:
-        self.refresh_cheats()
         for var in self.info_labels.values():
             var.set("-")
         self.file_tree.delete(*self.file_tree.get_children())
@@ -392,6 +445,7 @@ class App(ttk.Frame):
         self.icon_label.configure(image="")
 
         if self.save_dir is None:
+            self.refresh_cheats()
             return
 
         icon_path = self.save_dir / "ICON0.PNG"
@@ -418,16 +472,18 @@ class App(ttk.Frame):
                 self.log(f"Couldn't read PARAM.SFO: {e}")
 
         try:
-            self.pf = PfdFile.load(self.save_dir / "PARAM.PFD", PfdConfig())
+            self.pf = PfdFile.load(self.save_dir / "PARAM.PFD", PfdConfig(**self._games_conf_kwargs()))
         except PfdError as e:
             self.pf = None
             self.log(f"Couldn't read PARAM.PFD: {e}")
+            self.refresh_cheats()
             return
 
         self.info_labels["PFD version"].set(str(self.pf.version))
         self.info_labels["Trophy set file"].set("Yes" if self.pf.is_trophy else "No")
         for entry in self.pf.entries[: self.pf.num_used]:
             self.file_tree.insert("", "end", values=(entry.file_name, entry.file_size))
+        self.refresh_cheats()
 
     # ---- actions ----------------------------------------------------
 

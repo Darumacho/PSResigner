@@ -8,6 +8,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import games_conf
+from .cheats import extract_product_code
 from .pfd import PfdConfig, PfdError, PfdFile
 from .sfo import SfoError, SfoFile
 
@@ -23,8 +25,18 @@ def _parse_user_id(value: str) -> bytes:
     return raw
 
 
-def _config_from_args(args: argparse.Namespace) -> PfdConfig:
-    kwargs = {}
+def _config_from_args(args: argparse.Namespace, save_dir: Path) -> PfdConfig:
+    kwargs: dict = {}
+    product_code = extract_product_code(save_dir.name)
+    if product_code is not None:
+        try:
+            entry = games_conf.lookup(product_code)
+        except games_conf.GamesConfError:
+            entry = None
+        if entry is not None:
+            kwargs["secure_file_id_lookup"] = entry.secure_file_id_for
+            if entry.disc_hash_key is not None:
+                kwargs["disc_hash_key"] = entry.disc_hash_key
     if args.console_id is not None:
         kwargs["console_id"] = PfdConfig.console_id_from_hex(args.console_id)
     if args.user_id is not None:
@@ -50,7 +62,7 @@ def _load(save_dir: Path, config: PfdConfig) -> PfdFile:
 
 def cmd_info(args: argparse.Namespace) -> int:
     save_dir = Path(args.path)
-    pf = _load(save_dir, _config_from_args(args))
+    pf = _load(save_dir, _config_from_args(args, save_dir))
 
     sfo_path = save_dir / "PARAM.SFO"
     if sfo_path.exists():
@@ -78,7 +90,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     save_dir = Path(args.path)
-    config = _config_from_args(args)
+    config = _config_from_args(args, save_dir)
     pf = _load(save_dir, config)
     results = pf.check_file_hashes(save_dir)
 
@@ -108,7 +120,7 @@ def cmd_resign(args: argparse.Namespace) -> int:
         return 2
 
     source_dir = Path(args.path)
-    config = _config_from_args(args)
+    config = _config_from_args(args, source_dir)
 
     if args.output:
         target_dir = Path(args.output)

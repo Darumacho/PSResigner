@@ -395,11 +395,89 @@ Tout code d'un type non supporté (4/5/6/7/A-F, dialectes BSD/MicroPython) ou ma
 
 Sélectionner une ligne peuple un menu déroulant "Apply to file" (les fichiers réellement présents correspondant au motif, ex. `DAT-1` à `DAT-31`) ; bouton "Apply Cheat" qui patch le fichier choisi puis déclenche le même pipeline que `Resign` (réutilise `_do_resign`, `console_id`/`account_id`/`backup_var` déjà partagés — cf. décision prise avant de construire les onglets). Factorisé `_backup_save_dir()` pour éviter la 3ᵉ copie du même bloc de code (Resign en place + Apply Cheat).
 
+## 🔴 BUG CRITIQUE trouvé sur console réelle : "Apply Cheat" corrompait la save — corrigé
+
+**L'utilisateur a testé "Max Bolts" sur une vraie save (Ratchet & Clank 3, `NPEA00387_RC3_SAVEDATA_A`) → erreur PS3 80029207 au chargement ("save corrompue").**
+
+### Diagnostic
+
+Confirmé par recherche : `80029207` = erreur standard PS3 de donnée de save corrompue.
+
+Cause root, reproduite et prouvée en local (sur une copie, avec un `console_id` de test arbitraire — la valeur exacte ne change rien au diagnostic) :
+- `USR-DATA` (comme `DAT-*`, `SAVE_SYS.DAT`, etc.) n'a pas de clé de hash fixe connue — c'est la limitation "secure file ID par jeu" documentée depuis le tout début du projet, jusqu'ici jugée "pas urgente".
+- `PfdFile.recompute_file_hashes()` : quand la clé est inconnue, elle `continue` silencieusement (ne met pas à jour `entry.file_hashes[HASH_FILE]`) **mais met quand même à jour `entry_signature_table`/`top_hash`/`bottom_hash`** à partir de ce hash resté périmé.
+- Preuve directe : hash `USR-DATA` strictement identique avant et après patch+resign (`410e281d...` dans les deux cas), alors que le contenu réel du fichier avait changé. Le PFD reste "structurellement cohérent" (le hash périmé est bien chaîné partout) mais ne correspond plus au vrai contenu → la PS3 rejette la save au chargement.
+- **Conséquence grave** : quasiment aucun fichier de save réel (seuls PARAM.SFO et les `TROP*.DAT` fixes sont couverts) ne pouvait être patché "Apply Cheat" en toute sécurité — la fonctionnalité, comme livrée, était un piège pour presque tous les vrais jeux.
+
+### Correctif (livré immédiatement, avant toute autre chose)
+
+- `ps3save/pfd.py` : nouvelle méthode publique `PfdFile.can_rehash_file(file_name) -> bool` (sonde `_entry_hash_key` pour chaque hash applicable, retourne `False` si une clé manque).
+- `ps3save/gui.py` :
+  - `on_apply_cheat()` **refuse désormais explicitement** de patcher un fichier dont `can_rehash_file()` est `False`, avec un message clair citant l'erreur 80029207, *avant* la moindre confirmation/écriture (vérifié : aucune boîte de dialogue de confirmation atteinte, fichier intact).
+  - La liste de l'onglet Cheats marque désormais chaque cheat non-applicable avec `⚠` + un compteur dans le statut (`refresh_cheats()` appelé *après* le rechargement de `self.pf`, pas avant — réordonnancement nécessaire dans `refresh_info()` pour que `can_rehash_file()` dispose du bon `PfdFile`).
+
+**Testé** : le cas réel (RC3/`USR-DATA`) et le cas déjà connu (BCES01741/`DAT-*`) sont bien tous deux marqués `⚠` dans la liste, et une tentative d'`on_apply_cheat()` sur `USR-DATA` est bloquée avant toute écriture (vérifié avec `unittest.mock` sur `messagebox.showerror`/`askyesno`).
+
+**Mise à jour : pas de perte de données** — l'utilisateur avait fait son propre backup avant de tester.
+
+## ✅ Correction de fond : base `secure_file_id` de `games.conf` — implémentée
+
+L'utilisateur a demandé directement : "Est-ce qu'on a moyen d'avoir un fix pour le souci du hash ?" — donc, lever la limitation à la racine plutôt que de se contenter du garde-fou.
+
+### Recherche : comment pfdtool (PC, hors-ligne) utilise `secure_file_id`
+
+Contrairement à Apollo-PS4 (qui a besoin du noyau de la console), **pfdtool fait ça entièrement en pur logiciel sur PC** — exactement notre architecture. Récupéré `pfd.c`/`main.c`/`backend.c` du dépôt original (`bucanero/pfd_sfo_tools`) via `curl` :
+
+- `games.conf` associe des codes produit (`[CODE1/CODE2/.../CODEn]`) à un `secure_file_id` (16 octets hex) par motif de nom de fichier (`secure_file_id:*=...` ou un nom précis), plus un `disc_hash_key` optionnel par jeu (souvent commenté = "utiliser le fallback").
+- `pfd_generate_hash_key_for_secure_file_id()` (pfd.c:160) transforme ces 16 octets en la vraie clé HMAC de 20 octets via **exactement le même "byte-interleave"** qu'on utilise déjà pour les trophées (`_shuffle16` / `_SHUFFLE_OVERRIDES = {1:11, 2:15, 5:14, 8:10}`) — cette constante était déjà présente dans `pfd.py` depuis la toute première session, **jamais câblée**, en attente exacte de cette fonctionnalité.
+
+### Validation manuelle avant d'écrire le code
+
+KG's `games.conf` (dans `[PS3] Save Resigner`) contient les 4 jeux de test. Calcul à la main (`shuffle(secure_file_id, 20, overrides)` puis HMAC-SHA1) → **correspond exactement** au hash déjà stocké dans le vrai PARAM.PFD de chacune de nos 4 saves (`DAT-31`, `DATA0.DAT`, `SAVE_SYS.DAT`, et surtout `USR-DATA` : `410e281d...`, identique à la valeur périmée repérée dans le diagnostic du bug). Preuve complète avant d'intégrer quoi que ce soit au code.
+
+### games.conf en ligne (pas juste la copie locale de KG)
+
+Trouvé que `games.conf` est aussi hébergé dans le même dépôt communautaire que les `.savepatch` : [bucanero/apollo-patches/PS3/games.conf](https://github.com/bucanero/apollo-patches/blob/main/PS3/games.conf) (9208 lignes, cohérent avec la copie de KG, et à jour).
+
+### 🐛 Bug trouvé en cours de route : doublement des lignes en cache sous Windows
+
+En câblant le fetch+cache (même pattern que `cheats.py`), `parse_games_conf` retournait des `secure_file_id` vides pour `BCES01741` malgré une extraction manuelle correcte. Cause : `Path.write_text()` en mode texte **retraduit** les `\n` déjà présents dans le texte récupéré (CRLF du fichier GitHub) vers `os.linesep` — sur Windows, un `\r\n` existant devient `\r\r\n` sur disque. À la relecture, ça insère une ligne vide fantôme après chaque vraie ligne, ce qui faisait réinitialiser `current` à `None` juste après l'en-tête de section, avant que la ligne `secure_file_id:` ne soit lue. `cheats.py` avait exactement le même pattern de cache mais n'était pas symptomatique (les lignes vides y sont de toute façon ignorées) — corrigé par précaution aux deux endroits : normaliser `\r\n`/`\r` → `\n` juste après le décodage, avant d'écrire en cache.
+
+### Implémentation
+
+- `ps3save/games_conf.py` (nouveau) : `fetch_games_conf()` (HTTPS + cache `~/.ps3save/games_conf_cache/`), `parse_games_conf()`, `GameEntry.secure_file_id_for(file_name)` (wildcard via `fnmatch`), `lookup(product_code)`.
+- `ps3save/pfd.py` : `_shuffle16` généralisé en `_shuffle(src, out_size, overrides)` (16 reste un cas particulier) ; nouveau `_secure_file_id_to_hash_key()` (sortie 20 octets) ; `PfdConfig.secure_file_id_lookup: Callable[[str], bytes | None] | None = None` (nouveau champ, rétrocompatible — `None` par défaut = comportement identique à avant) ; `_entry_hash_key()` l'essaie en dernier recours avant de lever `PfdError`.
+- `ps3save/gui.py` : `App._games_conf_kwargs()` — recherche le jeu via `extract_product_code(self.save_dir.name)`, attache `secure_file_id_lookup` (+ `disc_hash_key` si présent dans `games.conf`) ; câblé dans `current_config()` et dans le chargement de `self.pf` (`refresh_info()`). Échec de lookup (jeu absent, réseau down) → repli silencieux sur l'ancien comportement, jamais une erreur bloquante.
+- `ps3save/cli.py` : même câblage, `_config_from_args()` prend maintenant aussi le dossier de save pour en déduire le code produit.
+
+**Testé, bout en bout, sur les 4 jeux de test** : `can_rehash_file()` passe de `False` à `True` pour `DAT-31`/`DATA0.DAT`/`SAVE_SYS.DAT`/`USR-DATA` ; `check_file_hashes()` retourne désormais `{0: True}` pour ces fichiers (au lieu de `{}` SKIPPED) ; **rejoué le scénario exact du bug signalé** (cheat "Max Bolts" sur `USR-DATA`) → patch + resign + `check_file_hashes` intégralement `True`, et la liste de l'onglet Cheats n'affiche plus de ⚠ pour ce cheat. Vérifié aussi en CLI (`check` affiche `USR-DATA FILE=OK` au lieu de SKIPPED) et dans l'exe PyInstaller figé (fetch HTTPS confirmé).
+
+## Test terrain post-fix : crash console (pas une corruption) — pas un bug PSResigner
+
+Rejoué sur console réelle : le cheat "Max Bolts" (Ratchet & Clank, `USR-DATA`) charge maintenant correctement (plus d'erreur 80029207 — le fix `secure_file_id` fonctionne), **mais fait planter la console après chargement**.
+
+Diagnostic : vérifié par diff complet avant/après patch → **exactement 4 octets modifiés** (ceux visés par le code, `0x24`-`0x27`), taille de fichier inchangée, rien d'autre touché. Le patch de PSResigner est chirurgicalement exact — le crash n'est pas causé par notre pipeline.
+
+Cause la plus probable, identifiée avec l'utilisateur : la save vient de **The Ratchet & Clank Trilogy** (remaster HD), mais `games.conf` catégorise `NPEA00387` sous *"Ratchet & Clank: Up Your Arsenal"* (le jeu PS2 d'origine en rachat digital). Le format crypto PFD a été conservé à l'identique entre les deux (d'où notre hash qui matche parfaitement), mais la disposition interne des données de save a pu changer dans le remaster HD. Le cheat communautaire a probablement été écrit pour la disposition mémoire du jeu PS2 d'origine, pas celle du remaster — un risque inhérent aux bases de cheats communautaires (identique avec Apollo/Save Wizard sur ce même cheat), pas quelque chose à corriger côté PSResigner.
+
+Digital vs physique : confirmé au passage que les codes produit diffèrent par convention (`BCES`/`BLES`/`BCUS`/`BLUS` = physique, `NPEA`/`NPUA`/`NPJA`/etc. = digital PSN) — mais le code de cette save (`NPEA00387`) est généré par la console elle-même, donc fiable comme identifiant, le souci est seulement la correspondance version-du-jeu ↔ disposition-mémoire-du-cheat.
+
+**L'utilisateur testera avec d'autres jeux quand il aura le temps.**
+
+## Accent couleur sur les boutons d'action — fait
+
+Demande : "un peu plus de couleurs" dans l'appli. Proposé un mockup ciblé (pas un relookage complet) avant d'implémenter quoi que ce soit — testé en clair/sombre, validé par l'utilisateur ("ça me plaît pour le moment") avant de recompiler.
+
+- `ps3save/theme.py` : couleur `accent` (bleu, `#0070cc` clair / `#3b82f6` sombre, cohérent avec l'icône PlayStation de l'app) + `accent_active`/`accent_fg`, nouveau style ttk `Accent.TButton`.
+- `ps3save/gui.py` : style appliqué aux 3 boutons d'action principaux — `Resign (in place)`, `Resign to new folder...`, `Apply Cheat` — le reste (Browse, Check hashes, Profiles, Reload) reste neutre pour garder la hiérarchie visuelle claire.
+
+Les deux `.exe` sont reconstruits avec ce changement.
+
 ## Prochaine étape
 
-1. Autres tests sur console réelle (trophées, changement d'Account ID, **et maintenant un vrai cheat appliqué en conditions réelles**) — toujours en attente.
-2. Éventuellement le type `4` (multi-write) pour pousser la couverture au-delà de 93%.
-3. Suite de l'embellissement si besoin (barre de titre native sombre sous Windows).
+1. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
+2. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
+3. Suite de l'embellissement si l'utilisateur en a envie (en-têtes de section colorés, barre de titre native sombre sous Windows, etc.).
 
 ## Références (à re-télécharger si besoin, non copiées dans ce repo)
 

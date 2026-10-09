@@ -104,6 +104,13 @@ def fetch_savepatch(product_code: str, platform: str = "PS3", use_cache: bool = 
     except urllib.error.URLError as e:
         raise CheatsError(f"Couldn't reach the cheat database: {e.reason}")
 
+    # Normalize to \n before caching: the file is CRLF, and Path.write_text()
+    # (text mode) re-translates each \n to os.linesep on Windows, turning
+    # "\r\n" into "\r\r\n" on disk (harmless here since blank lines are
+    # skipped either way, but games_conf.py hit a real bug from the same
+    # pattern -- keeping both consistent).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(text, encoding="utf-8")
     return text

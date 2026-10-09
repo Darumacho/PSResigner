@@ -24,6 +24,7 @@ import hmac
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from Crypto.Cipher import AES
 
@@ -58,15 +59,15 @@ HASH_FILE_DHK_CID2 = 2    # PARAM.SFO only: disc_hash_key (non-trophy) or shuffl
 HASH_FILE_AID_UID = 3     # PARAM.SFO only: authentication_id (non-trophy) or shuffled user_id (trophy)
 
 
-def _shuffle16(src: bytes, overrides: dict[int, int]) -> bytes:
+def _shuffle(src: bytes, out_size: int, overrides: dict[int, int]) -> bytes:
     """Reproduce pfdtool's byte-interleave used to build hash keys / IVs.
 
     `overrides` maps output index -> fixed byte value; every other output
     byte is taken from `src` in order.
     """
-    out = bytearray(16)
+    out = bytearray(out_size)
     j = 0
-    for i in range(16):
+    for i in range(out_size):
         if i in overrides:
             out[i] = overrides[i]
         else:
@@ -75,7 +76,23 @@ def _shuffle16(src: bytes, overrides: dict[int, int]) -> bytes:
     return bytes(out)
 
 
+def _shuffle16(src: bytes, overrides: dict[int, int]) -> bytes:
+    return _shuffle(src, 16, overrides)
+
+
 _SHUFFLE_OVERRIDES = {1: 11, 2: 15, 5: 14, 8: 10}
+
+# Turns a games.conf secure_file_id (16 bytes) into the 20-byte HMAC key for
+# a save file pfdtool/Apollo don't have a fixed name for (anything besides
+# PARAM.SFO and the TROP*.DAT names) -- pfdtool's
+# pfd_generate_hash_key_for_secure_file_id(). Same byte-interleave as
+# _SHUFFLE_OVERRIDES, just widened to 20 bytes since a HASH_KEY is 20 bytes
+# while a secure_file_id is only 16.
+SECURE_FILE_ID_KEY_SIZE = 20
+
+
+def _secure_file_id_to_hash_key(secure_file_id: bytes) -> bytes:
+    return _shuffle(secure_file_id, SECURE_FILE_ID_KEY_SIZE, _SHUFFLE_OVERRIDES)
 
 
 def hmac_sha1(key: bytes, data: bytes) -> bytes:
@@ -122,6 +139,12 @@ class PfdConfig:
     troptrns_dat_key: bytes = keys.TROPTRNS_DAT_KEY
     tropconf_sfm_key: bytes = keys.TROPCONF_SFM_KEY
     disc_hash_key: bytes = keys.FALLBACK_DISC_HASH_KEY
+    # Per-game override, from games.conf (ps3save/games_conf.py): given a
+    # file name, returns its 16-byte secure_file_id, or None if this game
+    # isn't in that database / doesn't have an entry for that file. Left
+    # unset, every non-PARAM.SFO/non-TROP*.DAT file stays unhashable, same
+    # as before games.conf support existed.
+    secure_file_id_lookup: Callable[[str], bytes | None] | None = None
 
     @staticmethod
     def user_id_from_int(n: int) -> bytes:
@@ -282,10 +305,32 @@ class PfdFile:
             return cfg.troptrns_dat_key
         if name == "TROPCONF.SFM":
             return cfg.tropconf_sfm_key
+        if cfg.secure_file_id_lookup is not None:
+            secure_file_id = cfg.secure_file_id_lookup(entry.file_name)
+            if secure_file_id is not None:
+                return _secure_file_id_to_hash_key(secure_file_id)
         raise PfdError(
             f"no fixed hash key known for '{entry.file_name}' "
             "(needs a per-game 'secure file ID' this tool doesn't carry)"
         )
+
+    def can_rehash_file(self, file_name: str) -> bool:
+        """Whether recompute_file_hashes() can actually recompute this
+        file's stored hash(es) to match new content. False for files that
+        need a per-game "secure file ID" key this tool doesn't have (every
+        real save file besides PARAM.SFO and the fixed TROP*.DAT names) --
+        patching such a file leaves its stored hash pointing at the OLD
+        content, which the PS3 then rejects as corrupted (error 80029207,
+        confirmed against a real save when this was still unguarded)."""
+        entry = self.find_entry(file_name)
+        if entry is None:
+            return False
+        for which in self._applicable_hash_types(entry):
+            try:
+                self._entry_hash_key(entry, which)
+            except PfdError:
+                return False
+        return True
 
     def _applicable_hash_types(self, entry: PfdEntry) -> list[int]:
         if entry.file_name.upper() != "PARAM.SFO":
