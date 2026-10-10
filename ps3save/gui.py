@@ -1,8 +1,9 @@
 """Minimal tkinter GUI for ps3save: browse a save folder, inspect it,
 check its hashes and resign it to a new console_id/user_id.
 
-Pure stdlib (tkinter) + pfd.py/sfo.py; no extra GUI dependency, so it
-runs the same way on Windows and macOS.
+Pure stdlib (tkinter) + pfd.py/sfo.py, plus tkinterdnd2 for native
+drag-and-drop (tkinter alone has no cross-platform DnD support); runs
+the same way on Windows and macOS either way.
 """
 
 from __future__ import annotations
@@ -21,6 +22,12 @@ except ImportError:
     Image = None
     ImageTk = None
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
+
 from . import games_conf, theme
 from .cheats import (
     CheatEntry,
@@ -30,8 +37,10 @@ from .cheats import (
     extract_product_code,
     list_cheats_for_save,
 )
+from .history import HistoryEntry, append_history, clear_history, load_history
 from .pfd import PfdConfig, PfdError, PfdFile
 from .profiles import Profile, ProfileError, load_profiles, save_profiles
+from .region import region_label
 from .settings import load_settings, save_settings
 from .sfo import SfoError, SfoFile
 
@@ -140,11 +149,13 @@ class App(ttk.Frame):
         }
         self._settings = load_settings()
         self.dark_var = tk.BooleanVar(value=bool(self._settings.get("dark_mode", False)))
+        self._recent_folders: list[str] = list(self._settings.get("recent_folders", []))
 
         self._build_folder_row()
         self._build_info_panel()
         self._build_notebook()
         self._build_log()
+        self._setup_drag_drop()
 
         self.apply_theme()
 
@@ -201,6 +212,15 @@ class App(ttk.Frame):
         self._settings["last_console_id"] = console_id_hex
         save_settings(self._settings)
 
+    def _remember_recent_folder(self, path: Path) -> None:
+        entry = str(path)
+        recents = [p for p in self._recent_folders if p != entry]
+        recents.insert(0, entry)
+        self._recent_folders = recents[:8]
+        self._settings["recent_folders"] = self._recent_folders
+        save_settings(self._settings)
+        self.folder_combo.configure(values=self._recent_folders)
+
     # ---- layout ---------------------------------------------------
 
     def _build_folder_row(self) -> None:
@@ -210,7 +230,9 @@ class App(ttk.Frame):
 
         ttk.Label(row, text="Save folder:").grid(row=0, column=0, sticky="w")
         self.folder_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.folder_var).grid(row=0, column=1, sticky="ew", padx=6)
+        self.folder_combo = ttk.Combobox(row, textvariable=self.folder_var, values=self._recent_folders)
+        self.folder_combo.grid(row=0, column=1, sticky="ew", padx=6)
+        self.folder_combo.bind("<<ComboboxSelected>>", self._on_recent_folder_selected)
         ttk.Button(
             row, text="Browse...", image=self._icons.get("open-folder.png"), compound="left",
             command=self.on_browse,
@@ -225,24 +247,26 @@ class App(ttk.Frame):
         box.columnconfigure(1, weight=2, minsize=220)
 
         self.info_labels: dict[str, tk.StringVar] = {}
-        for i, field in enumerate(["Title", "Sub-title", "PFD version", "Trophy set file", "Account ID"]):
+        fields = ["Title", "Sub-title", "PFD version", "Trophy set file", "Account ID",
+                   "Product code", "Hash profile"]
+        for i, field in enumerate(fields):
             ttk.Label(box, text=f"{field}:").grid(row=i, column=0, sticky="w", padx=(4, 8))
             var = tk.StringVar(value="-")
             ttk.Label(box, textvariable=var).grid(row=i, column=1, sticky="w")
             self.info_labels[field] = var
 
         columns = ("name", "size")
-        self.file_tree = ttk.Treeview(box, columns=columns, show="headings", height=6)
+        self.file_tree = ttk.Treeview(box, columns=columns, show="headings", height=len(fields))
         self.file_tree.heading("name", text="File")
         self.file_tree.heading("size", text="Size (bytes)")
         self.file_tree.column("name", width=110)
         self.file_tree.column("size", width=110, anchor="e")
-        self.file_tree.grid(row=0, column=2, rowspan=5, sticky="nsew", padx=(12, 4))
+        self.file_tree.grid(row=0, column=2, rowspan=len(fields), sticky="nsew", padx=(12, 4))
         box.columnconfigure(2, weight=1)
 
         self.icon_image: tk.PhotoImage | None = None
         self.icon_label = ttk.Label(box)
-        self.icon_label.grid(row=0, column=3, rowspan=5, padx=(4, 4))
+        self.icon_label.grid(row=0, column=3, rowspan=len(fields), padx=(4, 4))
 
     def _build_notebook(self) -> None:
         """Hand-rolled tab switcher instead of ttk.Notebook: a Notebook is
@@ -307,10 +331,15 @@ class App(ttk.Frame):
         self.account_id_var = tk.StringVar()
         ttk.Entry(identity, textvariable=self.account_id_var, width=40).grid(row=1, column=1, padx=6, pady=(0, 4))
 
+        identity_buttons = ttk.Frame(identity)
+        identity_buttons.grid(row=1, column=2, columnspan=2, sticky="e", padx=6)
         ttk.Button(
-            identity, text="Profiles...", image=self._icons.get("profiles.png"), compound="left",
+            identity_buttons, text="History...", command=self.on_open_history,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            identity_buttons, text="Profiles...", image=self._icons.get("profiles.png"), compound="left",
             command=self.on_open_profiles,
-        ).grid(row=1, column=2, columnspan=2, sticky="e", padx=6)
+        ).pack(side="left")
 
         buttons = ttk.Frame(parent)
         buttons.grid(row=1, column=0, sticky="ew")
@@ -469,7 +498,7 @@ class App(ttk.Frame):
                 backup_dir = self._backup_save_dir()
             patched = apply_sw_codes(target_path.read_bytes(), entry.codes)
             target_path.write_bytes(patched)
-            self._do_resign(self.save_dir, config)
+            self._do_resign(self.save_dir, config, action=f"apply_cheat:{entry.name}")
         except (UnsupportedCodeError, PfdError, SfoError, OSError) as e:
             messagebox.showerror("Apply cheat failed", str(e))
             return
@@ -507,20 +536,33 @@ class App(ttk.Frame):
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
+    def _check_game_profile(self) -> tuple[games_conf.GameEntry | None, str]:
+        """Best-effort games.conf lookup for the loaded save's game, plus a
+        human-readable status -- used both to build the resign kwargs
+        (secure_file_id_lookup/disc_hash_key) and to tell the user in the
+        UI whether a recognized hash profile was actually found, instead
+        of silently trusting an unrecognized game's resign to "just work"
+        (it still does, for PARAM.SFO/trophies -- just not for other
+        files that need a per-game secure_file_id)."""
+        if self.save_dir is None:
+            return None, "-"
+        product_code = extract_product_code(self.save_dir.name)
+        if product_code is None:
+            return None, "-"
+        try:
+            entry = games_conf.lookup(product_code)
+        except games_conf.GamesConfError as e:
+            return None, f"Lookup failed ({e})"
+        if entry is None:
+            return None, "Not in database (PARAM.SFO/trophies only)"
+        return entry, f"Recognized ({len(entry.secure_file_ids)} file key(s))"
+
     def _games_conf_kwargs(self) -> dict:
         """secure_file_id_lookup (+ disc_hash_key override) for the loaded
         save's game, if games.conf has an entry for it -- best-effort, {}
         on any lookup failure so callers just fall back to today's
         PARAM.SFO/TROP*.DAT-only behavior."""
-        if self.save_dir is None:
-            return {}
-        product_code = extract_product_code(self.save_dir.name)
-        if product_code is None:
-            return {}
-        try:
-            entry = games_conf.lookup(product_code)
-        except games_conf.GamesConfError:
-            return {}
+        entry, _status = self._check_game_profile()
         if entry is None:
             return {}
         kwargs: dict = {"secure_file_id_lookup": entry.secure_file_id_for}
@@ -557,6 +599,12 @@ class App(ttk.Frame):
             self.refresh_cheats()
             return
 
+        product_code = extract_product_code(self.save_dir.name)
+        self.info_labels["Product code"].set(product_code or "-")
+
+        _entry, profile_status = self._check_game_profile()
+        self.info_labels["Hash profile"].set(profile_status)
+
         icon_path = self.save_dir / "ICON0.PNG"
         if icon_path.exists():
             try:
@@ -572,7 +620,13 @@ class App(ttk.Frame):
         if sfo_path.exists():
             try:
                 sfo = SfoFile.load(sfo_path)
-                self.info_labels["Title"].set(sfo.title or "-")
+                title = sfo.title or "-"
+                region = region_label(product_code) if product_code else None
+                # Some SFOs already bake the region into the stored title
+                # (seen on at least one real save) -- don't double it up.
+                if region and region not in title:
+                    title = f"{title} {region}"
+                self.info_labels["Title"].set(title)
                 self.info_labels["Sub-title"].set(sfo.sub_title or "-")
                 account_id = sfo.get("ACCOUNT_ID")
                 if isinstance(account_id, bytes) and account_id.strip(b"\x00"):
@@ -596,19 +650,45 @@ class App(ttk.Frame):
 
     # ---- actions ----------------------------------------------------
 
+    def _load_save_folder(self, path: Path) -> bool:
+        if not (path / "PARAM.PFD").exists():
+            messagebox.showerror("Not a save folder", f"No PARAM.PFD found in:\n{path}")
+            return False
+        self.save_dir = path
+        self.folder_var.set(str(path))
+        self._remember_recent_folder(path)
+        self.clear_log()
+        self.refresh_info()
+        self.log(f"Loaded {path}")
+        return True
+
+    def _on_recent_folder_selected(self, _event) -> None:
+        self._load_save_folder(Path(self.folder_var.get()))
+
+    def _setup_drag_drop(self) -> None:
+        if DND_FILES is None:
+            return
+        self.master.drop_target_register(DND_FILES)
+        self.master.dnd_bind("<<Drop>>", self._on_drop)
+
+    def _on_drop(self, event) -> None:
+        # event.data is a Tcl list (braces around any path containing
+        # spaces) -- tk.splitlist parses that properly instead of a naive
+        # str.split(' ').
+        paths = self.master.tk.splitlist(event.data)
+        if not paths:
+            return
+        path = Path(paths[0])
+        if not path.is_dir():
+            messagebox.showerror("Not a folder", f"Dropped item isn't a folder:\n{path}")
+            return
+        self._load_save_folder(path)
+
     def on_browse(self) -> None:
         chosen = filedialog.askdirectory(title="Select a PS3 save folder (containing PARAM.PFD)")
         if not chosen:
             return
-        path = Path(chosen)
-        if not (path / "PARAM.PFD").exists():
-            messagebox.showerror("Not a save folder", f"No PARAM.PFD found in:\n{path}")
-            return
-        self.save_dir = path
-        self.folder_var.set(str(path))
-        self.clear_log()
-        self.refresh_info()
-        self.log(f"Loaded {path}")
+        self._load_save_folder(Path(chosen))
 
     def on_check(self) -> None:
         if self.save_dir is None:
@@ -645,7 +725,7 @@ class App(ttk.Frame):
         shutil.copytree(self.save_dir, backup_dir)
         return backup_dir
 
-    def _do_resign(self, target_dir: Path, config: PfdConfig) -> None:
+    def _do_resign(self, target_dir: Path, config: PfdConfig, action: str) -> None:
         account_id = self.account_id_var.get().strip()
         user_id_str = self.user_id_var.get().strip()
         sfo_path = target_dir / "PARAM.SFO"
@@ -660,6 +740,15 @@ class App(ttk.Frame):
         pf = PfdFile.load(target_dir / "PARAM.PFD", config)
         pf.resign(target_dir)
         pf.save(target_dir / "PARAM.PFD")
+
+        append_history(HistoryEntry(
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            action=action,
+            folder=str(target_dir),
+            console_id=config.console_id.hex(),
+            user_id=config.user_id.decode(),
+            account_id=account_id,
+        ))
 
     def on_resign_in_place(self) -> None:
         if self.save_dir is None:
@@ -686,7 +775,7 @@ class App(ttk.Frame):
         try:
             if do_backup:
                 backup_dir = self._backup_save_dir()
-            self._do_resign(self.save_dir, config)
+            self._do_resign(self.save_dir, config, action="resign_in_place")
         except (PfdError, SfoError, OSError) as e:
             messagebox.showerror("Resign failed", str(e))
             return
@@ -722,7 +811,7 @@ class App(ttk.Frame):
 
         try:
             shutil.copytree(self.save_dir, target_dir)
-            self._do_resign(target_dir, config)
+            self._do_resign(target_dir, config, action="resign_to_new_folder")
         except (PfdError, SfoError, OSError) as e:
             messagebox.showerror("Resign failed", str(e))
             return
@@ -737,6 +826,9 @@ class App(ttk.Frame):
 
     def on_open_profiles(self) -> None:
         ProfilesDialog(self)
+
+    def on_open_history(self) -> None:
+        HistoryDialog(self)
 
 
 class ProfilesDialog(tk.Toplevel):
@@ -930,8 +1022,83 @@ class ProfilesDialog(tk.Toplevel):
         self.app.log(message + ")")
 
 
+class HistoryDialog(tk.Toplevel):
+    """Read-only log of past resign operations (plain resign, resign-to-
+    new-folder, apply-cheat) -- newest first. Double-clicking a row
+    reloads that save folder in the main window, same as picking one
+    from the "Récents" combobox."""
+
+    def __init__(self, app: App):
+        super().__init__(app.master)
+        self.app = app
+        self.title("History")
+        self.geometry("760x420")
+        self.transient(app.master)
+        _round_window_corners(self)
+
+        self.entries: list[HistoryEntry] = list(reversed(load_history()))
+
+        self._build()
+        self._refresh_list()
+        self.configure(background=theme.palette(app.dark_var.get())["bg"])
+
+    def _build(self) -> None:
+        columns = ("timestamp", "action", "folder", "console_id", "account_id")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=14)
+        self.tree.heading("timestamp", text="Date")
+        self.tree.heading("action", text="Action")
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("console_id", text="Console ID")
+        self.tree.heading("account_id", text="Account ID")
+        self.tree.column("timestamp", width=130)
+        self.tree.column("action", width=130)
+        self.tree.column("folder", width=260)
+        self.tree.column("console_id", width=140)
+        self.tree.column("account_id", width=110)
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        self.tree.bind("<Double-Button-1>", lambda _e: self.on_load_folder())
+
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(buttons, text="Load folder", command=self.on_load_folder).pack(side="left")
+        ttk.Button(buttons, text="Clear history", command=self.on_clear).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+    def _refresh_list(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for i, entry in enumerate(self.entries):
+            self.tree.insert("", "end", iid=str(i), values=(
+                entry.timestamp, entry.action, entry.folder, entry.console_id, entry.account_id,
+            ))
+
+    def _selected_entry(self) -> HistoryEntry | None:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return self.entries[int(sel[0])]
+
+    def on_load_folder(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            messagebox.showwarning("No entry selected", "Select a history entry first.", parent=self)
+            return
+        path = Path(entry.folder)
+        if not path.exists():
+            messagebox.showerror("Folder not found", f"This folder no longer exists:\n{path}", parent=self)
+            return
+        self.app._load_save_folder(path)
+
+    def on_clear(self) -> None:
+        if not messagebox.askyesno("Clear history", "Delete the whole resign history? This can't be undone.",
+                                    parent=self):
+            return
+        clear_history()
+        self.entries = []
+        self._refresh_list()
+
+
 def main() -> None:
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
     App(root)
     root.mainloop()
 

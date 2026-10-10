@@ -587,12 +587,51 @@ Demande : centrer verticalement l'image `ICON0.PNG` affichée à côté du table
 
 **Deuxième incident (capture, pas de clic cette fois)** : la première tentative de capture a de nouveau montré la fenêtre du jeu ContrabandPolice au lieu de PSResigner -- cette fois pas un clic erroné, mais `CopyFromScreen` qui capture les pixels réellement affichés à l'écran, et la fenêtre du jeu se trouvait au-dessus de celle de PSResigner à cet endroit. Fix : `SetForegroundWindow`/`ShowWindow` sur le HWND de PSResigner avant la capture, pour la ramener au premier plan.
 
+## Dossier test/ ajouté au repo
+
+L'utilisateur a retiré la ligne `/test/` du `.gitignore` lui-même (le repo GitHub `Darumacho/PSResigner` est privé et ce sont ses propres sauvegardes) -- `git add test/` effectué pour suivre tout le contenu actuel. Pas de commit fait automatiquement, laissé à l'utilisateur.
+
+## Quatre nouvelles features (Récents, Glisser-déposer, Historique, Détection auto) — faites
+
+L'utilisateur a demandé "d'autres idées de features", une liste en a été proposée, et il a choisi ces quatre-là avec un ordre d'implémentation explicite. Idées non retenues pour l'instant notées dans la mémoire du projet (`project_next_steps.md`), pas ici.
+
+**1. Liste "Récents"** : le simple `ttk.Entry` du `Save folder` devient un `ttk.Combobox` (`folder_combo`), avec `values` = les derniers dossiers ouverts. Nouvel helper central `App._load_save_folder(path) -> bool` (valide la présence de `PARAM.PFD`, charge, logue, retient le dossier) utilisé par `on_browse`, par la sélection dans la combobox (`<<ComboboxSelected>>` → `_on_recent_folder_selected`), et plus tard par le drag-and-drop et l'historique -- un seul point d'entrée au lieu de dupliquer la logique de chargement. `_remember_recent_folder()` déduplique (le plus récent en tête), plafonne à 8 entrées, persiste dans `settings.json` (`recent_folders`) comme `last_console_id`/`dark_mode`.
+
+**2. Glisser-déposer** : tkinter seul n'a pas de drag-and-drop cross-platform -- ajout de la dépendance `tkinterdnd2` (confirmé avec l'utilisateur avant d'ajouter une dépendance tierce, vu que le docstring du module revendiquait jusqu'ici "pure stdlib"). `main()` utilise `TkinterDnD.Tk()` au lieu de `tk.Tk()` si le module est disponible (repli silencieux sinon, même pattern que l'import Pillow). La fenêtre entière (`self.master`) est enregistrée comme cible de drop (`DND_FILES`), `_on_drop()` parse `event.data` via `tk.splitlist` (gère les chemins avec espaces, entourés d'accolades Tcl) et appelle `_load_save_folder()` sur le premier élément déposé.
+  - **PyInstaller** : `tkinterdnd2` embarque l'extension Tcl native `tkdnd` comme fichiers de données par plateforme/architecture (pas du code Python importable, donc invisible à l'analyse d'imports de PyInstaller). `PSResigner.spec` calcule maintenant dynamiquement le nom de sous-dossier (`win-x64`, `osx-arm64`, etc., même logique que `tkinterdnd2.TkinterDnD._require()`) et l'ajoute à `datas` -- chaque OS ne bundle que son propre sous-dossier, pas les 14 variantes du package. `pyproject.toml` : `tkinterdnd2` ajouté aux dépendances. Vérifié que l'exe figé démarre sans crash (tkdnd se charge correctement depuis `_MEIPASS`).
+  - `PSResignerCLI.spec` inchangé (CLI n'importe jamais `gui.py`).
+
+**3. Historique des resigns** : nouveau module `ps3save/history.py` (même pattern JSON que `profiles.py`), `HistoryEntry` (timestamp, action, folder, console_id, user_id, account_id), plafonné à 200 entrées. `App._do_resign()` prend maintenant un paramètre `action` et logue une entrée après chaque resign réussi -- un seul point d'instrumentation puisque les 3 flux (resign en place, resign vers nouveau dossier, apply cheat) passent tous par cette méthode. Nouveau bouton "History..." à côté de "Profiles...", ouvrant `HistoryDialog` (Treeview en lecture seule, plus récent en premier, double-clic pour recharger ce dossier via `_load_save_folder()`, bouton "Clear history").
+
+**4. Détection auto du jeu** : nouveau champ "Hash profile" dans le panneau Save info (6ᵉ ligne, `rowspan` du tableau de fichiers et de l'icône passés de 5 à 6 en conséquence). Nouvelle méthode `App._check_game_profile()` factorise la logique déjà présente dans `_games_conf_kwargs()` (extraction du code produit + lookup dans `games.conf`) et retourne en plus un statut lisible : `"Recognized (N file key(s))"`, `"Not in database (PARAM.SFO/trophies only)"`, `"Lookup failed (...)"` (si pas de cache + pas de réseau), ou `"-"` si rien n'est chargé. `_games_conf_kwargs()` réutilise cette méthode au lieu de dupliquer le try/except.
+
+**Testé** : chaque feature testée séparément via scripts headless (import direct de `ps3save.gui`, sans passer par un vrai clic écran) + capture de la fenêtre réelle ramenée au premier plan (`SetForegroundWindow`) pour confirmer visuellement -- combobox avec flèche déroulante, dialogue Historique avec deux entrées factices (nettoyées après coup, `history.json` supprimé puisqu'il n'existait pas avant ce test), ligne "Hash profile: Recognized (1 file key(s))" sur LOST PLANET 2. `tkinterdnd2.drop_target_register` confirmé présent sur la fenêtre racine. Resign réel non re-testé (aucune des 4 features ne touche `pfd.py`/`sfo.py`) ; l'exe figé lancé brièvement pour confirmer l'absence de crash au démarrage (chargement de `tkdnd`). `PSResigner.exe` reconstruit ; `PSResignerCLI.exe` non concerné, pas reconstruit.
+
+## Code produit affiché dans Save info — fait
+
+Demande : afficher aussi l'identifiant de jeu (BCES/NPEA/MRTC/etc.) dans le panneau Save info, pas seulement en interne pour le lookup `games.conf`.
+
+**Fix** : nouvelle ligne "Product code" dans `_build_info_panel()` (entre "Account ID" et "Hash profile" -- juste avant, puisque le code produit est ce qui permet de trouver le profil de hash juste en dessous). `fields` passe de 6 à 7 entrées, `rowspan` du tableau de fichiers et de l'icône suit automatiquement (`len(fields)`, pas de valeur en dur à changer). `refresh_info()` : `extract_product_code(self.save_dir.name)` (déjà importé, déjà utilisé par `_check_game_profile()`) renseigne le champ, `"-"` si le nom du dossier ne correspond à aucun format reconnu.
+
+**Testé** : script headless confirmant `Product code` = `MRTC00002` pour le dossier `MRTC0000210` (le code produit est les 4 lettres + 5 chiffres du préfixe, `PRODUCT_CODE_RE` dans `cheats.py` -- le reste du nom de dossier n'en fait pas partie). Capture de la fenêtre réelle confirmant la ligne bien positionnée, panneau toujours proportionné (icône centrée, tableau non décalé). `PSResigner.exe` reconstruit.
+
+## Région du jeu affichée à côté du titre — fait
+
+L'utilisateur a demandé en amont si on pouvait déduire la région (EU/NA/JP/Asia/Digital) à partir du code produit avant de coder quoi que ce soit -- recherche faite (voir réponse précédente, sources psdevwiki/RPCS3 forums) : Sony encode la région dans le préfixe à 4 lettres (1ʳᵉ lettre `B`=disque/`N`=PSN digital, 3ᵉ lettre = lettre de région `E`/`U`/`J`/`A`/`H`/`K`), convention communautaire reverse-engineered mais très stable. Confirmé faisable, puis "Dans ce cas, c'est parti" de l'utilisateur pour l'implémenter.
+
+**Implémentation** : nouveau module `ps3save/region.py`, fonction `region_label(product_code) -> str | None` avec une table statique (pas de source externe à requêter, contrairement à `games.conf`) ; renvoie `None` si le préfixe ne correspond à aucun format connu (ex: le code de test `MRTC00002`, qui ne suit pas le schéma Sony du tout) plutôt que de deviner à tort. `refresh_info()` (`gui.py`) ajoute ce label entre parenthèses à côté du `Title` affiché, ex. `"Ratchet & Clank 3 (EU, Digital)"`.
+
+**Bug trouvé puis corrigé pendant le test** : une des sauvegardes de test réelles (`BCES01741-PROFDATA-0`, un save `PROFDATA` système) a un titre SFO qui contient déjà littéralement `"(EU)"` dans la chaîne stockée -- l'ajout naïf donnait `"... (EU) (EU)"`. Fix : `if region and region not in title` avant de l'ajouter, pour ne pas dupliquer un suffixe de région déjà présent dans le titre d'origine.
+
+**Incident de capture d'écran** : la vérification visuelle suivante a affiché du contenu explicite sans rapport (une fenêtre vidéo superposée à l'écran à ce moment, capturée par `CopyFromScreen` comme les incidents précédents avec ContrabandPolice/l'Explorateur de fichiers) -- fichier supprimé immédiatement, signalé à l'utilisateur. **Décision prise : abandonner complètement la technique de capture d'écran réelle (`CopyFromScreen`) pour les vérifications visuelles de ce projet** -- trop d'incidents sur ce bureau multi-fenêtres (ContrabandPolice, rename Explorateur, maintenant ceci). Les tests headless (import direct de `ps3save.gui`, lecture des `StringVar`/widgets en mémoire) restent le moyen de vérification principal.
+
+**Testé** : script headless confirmant `region_label()` sur tous les préfixes connus (`BCES`→EU, `BLUS`→NA, `BLJM`→JP, `BCAS`/`BLAS`→Asia, `NP**`→variante Digital, codes inconnus→`None`) et sur les 4 sauvegardes de test réelles (dédoublonnage du cas `(EU)` confirmé). `PSResigner.exe` reconstruit.
+
 ## Prochaine étape
 
-1. Éventuellement le même traitement ("Log" sans cadre, ou liseré blanc façon onglets) si l'utilisateur le souhaite.
+1. Backlog de features discuté mais pas encore planifié (voir `project_next_steps.md` dans la mémoire Claude -- ne vit pas dans ce repo) : type `4` (multi-write) pour les cheats, re-vérification automatique des hashs après resign, bouton "Annuler le dernier resign", export/import des profils, validation d'intégrité pré-resign, mode "dry run", détection d'une PS3 montée en USB.
 2. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
-3. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
-4. Suite de l'embellissement si l'utilisateur en a envie (barre de titre native sombre sous Windows, etc.).
+3. Suite de l'embellissement si l'utilisateur en a envie (ex: même traitement "Log" sans cadre, ou liseré blanc façon onglets).
 
 ## Références (à re-télécharger si besoin, non copiées dans ce repo)
 

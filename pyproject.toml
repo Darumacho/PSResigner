@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pycryptodome",
     "Pillow",
+    "tkinterdnd2",
 ]
 
 [project.scripts]
