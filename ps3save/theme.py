@@ -88,18 +88,6 @@ def apply_ttk_style(root: tk.Tk, dark: bool) -> None:
     style.configure("TScrollbar", background=c["bg"], troughcolor=c["trough"],
                      bordercolor=c["border"], arrowcolor=c["fg"])
 
-    # borderwidth=0: otherwise clam draws a bordered box around the whole
-    # tab strip, including the empty space to the right of the tabs
-    # themselves (which are narrower than the content panel below).
-    style.configure("TNotebook", background=c["bg"], bordercolor=c["border"], borderwidth=0)
-    style.configure("TNotebook.Tab", background=c["entry_bg"], foreground=c["fg"],
-                     bordercolor=c["border"])
-    style.map(
-        "TNotebook.Tab",
-        background=[("selected", c["select_bg"])],
-        foreground=[("selected", c["select_fg"])],
-    )
-
 
 def style_text_widget(widget: tk.Text, dark: bool) -> None:
     c = palette(dark)

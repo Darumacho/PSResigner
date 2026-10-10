@@ -527,9 +527,69 @@ Nouvelle demande de l'utilisateur suite au fix des coins arrondis : il désignai
 
 L'utilisateur a signalé une "longue bande à côté des onglets". J'ai diagnostiqué et corrigé la bordure de `Notebook.client` (élément utilisant `bordercolor`/`lightcolor`/`darkcolor`, pas `borderwidth` — d'où l'inefficacité du fix précédent) en l'alignant sur la couleur de fond. **L'utilisateur a indiqué que ça ne correspondait pas à ce qu'il voulait** et a demandé à revenir en arrière pour réexpliquer — `theme.py` restauré à l'état d'avant cette tentative (juste `borderwidth=0`/`bordercolor=c["border"]`, sans les lignes `lightcolor`/`darkcolor`). Le diagnostic technique sur `Notebook.client` reste valable et pourra être réutilisé une fois la vraie demande clarifiée.
 
+## Remplacement du ttk.Notebook par des onglets faits main — fait
+
+L'utilisateur a réexpliqué avec une capture annotée : ce qu'il voulait vraiment, c'était que **seuls les boutons d'onglets dépassent**, rien d'opaque à leur droite.
+
+**Diagnostic clé** : un `ttk.Notebook` est un seul rectangle — sa largeur est dictée par son contenu le plus large (ici, le panneau "Target identity" + boutons, plus large que les deux onglets "Resign"/"Cheats"). La bande d'espace à droite des onglets, à hauteur de la bande d'onglets, appartient donc structurellement au widget et reste forcément remplie d'une couleur opaque (le fond du panneau) — **aucun réglage de couleur/bordure ne peut la rendre transparente**, contrairement aux deux tentatives précédentes qui essayaient de la maquiller plutôt que de s'en débarrasser structurellement.
+
+**Avant d'implémenter, vérification du risque de régression** (demandée explicitement par l'utilisateur) : `self.notebook` n'était référencé nulle part ailleurs dans le code (ni événement de changement d'onglet, ni logique métier dépendante) ; `_build_resign_tab()`/`_build_cheats_tab()` prennent déjà un `parent` générique en paramètre, agnostique de son type. Risque confirmé faible et bien délimité avant de coder.
+
+**Implémentation** : `ttk.Notebook` remplacé par deux `ttk.Button` ordinaires ("Resign"/"Cheats", dans une petite `ttk.Frame` qui ne prend que leur largeur naturelle) + deux `ttk.Frame` séparées griddées directement sur `self.master`, dont une seule visible à la fois via `.grid()`/`.grid_remove()` (`_select_tab()`). Le bouton actif utilise le style `Accent.TButton` déjà existant comme indicateur visuel. Renumérotation des lignes de la grille (`Log` passe de la ligne 3 à 4, `master.rowconfigure` ajusté en conséquence). Styles `TNotebook`/`TNotebook.Tab` devenus morts retirés de `theme.py`.
+
+**Testé** : bascule programmatique entre onglets (jamais les deux visibles en même temps, vérifié via `winfo_ismapped()`) + scénario resign complet rejoué (`check_file_hashes` correct). Capture d'écran confirmant l'effet exact demandé : les deux boutons ne prennent que leur largeur, le fond (dégradé bleu) est visible jusqu'au bord droit de la fenêtre. Les deux `.exe` sont reconstruits.
+
+## Bordure blanche autour de la fenêtre — fait
+
+L'utilisateur a redemandé les coins arrondis ("à nouveau ?") — revérifié et confirmé qu'ils fonctionnaient toujours (capture zoomée sur le coin réel), rien n'avait cassé ça. Il a ensuite précisé ce qu'il voulait vraiment en plus : une **bordure blanche** autour des fenêtres extérieures, en complément des coins déjà arrondis.
+
+Fix dans `_round_window_corners()` (`gui.py`) : ajout de l'attribut DWM `DWMWA_BORDER_COLOR` (34, Windows 11+) juste après `DWMWA_WINDOW_CORNER_PREFERENCE`, valeur blanche (`COLORREF 0x00FFFFFF`). Le fin liseré système que Windows dessine déjà autour de chaque fenêtre (habituellement un gris neutre, peu visible) devient blanc — complète l'arrondi existant plutôt que de le remplacer. Appliqué aux deux endroits déjà gérés par cette fonction (fenêtre principale + `ProfilesDialog`), aucun changement structurel nécessaire.
+
+**Testé** : capture d'écran de la vraie fenêtre (pas juste le contenu) confirmant le liseré blanc visible tout autour, coins toujours arrondis. Les deux `.exe` sont reconstruits.
+
+## Liseré autour des 4 sections — tentative annulée, puis stash
+
+Nouvelle demande suite à la bordure blanche de fenêtre : une capture annotée de 4 rectangles rouges entourant `Save folder`, `Save info`, le bloc onglets+contenu et `Log`, pour un contour fermé visible autour de chaque section (pas juste les bordures naturelles des widgets internes).
+
+**Première implémentation, rejetée** : `App._make_bordered_frame()` — un `tk.Frame` (`highlightthickness`) enveloppant chaque section en `ttk.Frame`, couleur `c["border"]` du thème. Pour la section onglets, la barre d'onglets ET le contenu actif étaient mis dans le **même** cadre bordé. L'utilisateur : *"Ce n'est pas bon, reviens en arrière"* — tous les changements (`gui.py`, `theme.py`, `SESSION_LOG.md`) annulés à la main (ré-édition inverse exacte) et les deux `.exe` reconstruits pour refléter le retour en arrière.
+
+**Stash puis comparaison** : l'utilisateur a demandé de stasher les changements en cours (`git stash push -u`), puis de reconstruire les `.exe` — ce qui a produit un exe reflétant l'état `main` commité (onglets Notebook à l'ancienne, avec la bande vide et un liseré blanc englobant tabs+contenu). Comparaison par capture entre cette version et la version stashée (onglets faits main, sans cadre) a permis de clarifier la vraie demande : un **hybride** des deux.
+
+## Liseré blanc autour du seul panneau de contenu des onglets — fait
+
+Demande clarifiée : garder les onglets faits main tels quels (rien ne les enveloppe, ils ne prennent que leur largeur propre) + un liseré **blanc** (pas la couleur de bordure du thème) autour du panneau de contenu actif seulement, pas autour de la ligne d'onglets elle-même — pour éviter de réintroduire la bande vide de l'ancien Notebook tout en retrouvant l'aspect "page" visible sur l'ancienne capture.
+
+- `git stash pop` pour récupérer le travail de la session (coins arrondis, bordure blanche de fenêtre, onglets faits main) resté dans le stash.
+- `_build_notebook()` (`gui.py`) : ajout d'un `tk.Frame` `content_border` (`highlightthickness=1`, `highlightbackground="white"`) entre la barre d'onglets et les deux frames de contenu (`resign`/`cheats`), qui deviennent désormais enfants de `content_border` plutôt que de `self.master` directement. `content_border.columnconfigure(0, weight=1)` pour que le contenu actif remplisse bien sa largeur. La barre d'onglets (`tab_bar`) reste à part, hors de ce cadre.
+- `apply_theme()` : synchronise le fond de `content_border` (`self._content_border`) avec `c["bg"]` à chaque bascule clair/sombre — le liseré lui-même reste blanc fixe (pas dépendant du thème), comme la bordure DWM de la fenêtre.
+
+**Testé** : capture d'écran de la fenêtre réelle confirmant le liseré blanc fermé autour du panneau de contenu, les deux boutons d'onglets qui dépassent librement au-dessus sans aucune bande vide. Validé par l'utilisateur ("C'est parfait comme ça"). Les deux `.exe` sont reconstruits.
+
+## Hauteur fixe du panneau Log — fait
+
+L'utilisateur a remarqué que le panneau `Log` devenait énorme par défaut (onglet Resign, contenu court) alors qu'il paraissait bien plus compact sur l'onglet Cheats (contenu plus grand) — et voulait ce format compact comme défaut, sans toucher au redimensionnement du bloc onglets lui-même.
+
+**Diagnostic** : `master.rowconfigure(4, weight=1)` donnait toute la hauteur verticale restante de la fenêtre (taille fixe 780x720) à la ligne du `Log`. Comme la hauteur du bloc onglets (`content_border`) varie selon l'onglet actif (118px sur Resign, 361px sur Cheats, mesuré via un script d'inspection headless important `ps3save.gui.App` directement, sans clic réel), le `Log` se voyait attribuer tout le reste : 320px sur Resign, seulement 77px sur Cheats (compressé sous sa taille naturelle demandée).
+
+**Fix** : suppression de `master.rowconfigure(4, weight=1)` (`gui.py`, `App.__init__`) -- le `Log` n'absorbe plus l'espace restant. `tk.Text(height=12, ...)` réduit à `height=5` pour une taille par défaut modeste. Résultat vérifié : `log_box` fait désormais une hauteur fixe de 107px, identique sur les deux onglets, immédiatement sous le bloc onglets (qui continue de varier sa propre hauteur comme avant, inchangé). L'espace libéré en bas de fenêtre (sur l'onglet Resign, plus court) laisse simplement voir le fond d'écran, cohérent avec le reste de l'interface.
+
+**Incident lors du test** : une tentative d'automatiser un clic réel sur le bouton "Cheats" (via coordonnées écran + `mouse_event`) a cliqué par erreur sur la fenêtre du jeu **ContrabandPolice** de l'utilisateur (superposée à cet endroit de l'écran), potentiellement au niveau d'un slider de réglage ("Durée du jour", "Circulation", etc.) -- signalé explicitly à l'utilisateur pour qu'il vérifie les réglages du jeu. **Leçon retenue : ne plus jamais automatiser de clic réel à l'écran pour tester cette appli ; utiliser uniquement l'inspection headless (`app._select_tab(...)` appelé directement en import Python) ou des captures sans interaction simulée.**
+
+**Testé** : script headless confirmant `log_box` fixe à 107px sur Resign et sur Cheats (plus de variation 320px/77px) ; capture d'écran de la fenêtre réelle sur l'onglet Resign confirmant le rendu compact attendu. Les deux `.exe` sont reconstruits.
+
+## Icône du jeu centrée dans son cadre — fait
+
+Demande : centrer verticalement l'image `ICON0.PNG` affichée à côté du tableau de fichiers, au lieu de la laisser ancrée en haut.
+
+**Fix** : `_build_info_panel()` (`gui.py`) -- `self.icon_label.grid(row=0, column=3, rowspan=5, sticky="n", padx=(4, 4))` → suppression de `sticky="n"`. Sans ce `sticky`, Tk centre le widget sur les deux axes dans sa cellule (qui s'étend sur les 5 lignes du panneau, `rowspan=5`, la même hauteur que le tableau de fichiers juste à côté) au lieu de l'ancrer en haut.
+
+**Testé** : chargement direct d'un dossier de sauvegarde (`MRTC0000210`, LOST PLANET 2) via script headless (`app.save_dir = ...; app.refresh_info()`, sans passer par le dialogue de sélection de fichier) puis capture de la fenêtre réelle, confirmant le logo du jeu centré verticalement entre les lignes `Title` et `Account ID`. Les deux `.exe` sont reconstruits.
+
+**Deuxième incident (capture, pas de clic cette fois)** : la première tentative de capture a de nouveau montré la fenêtre du jeu ContrabandPolice au lieu de PSResigner -- cette fois pas un clic erroné, mais `CopyFromScreen` qui capture les pixels réellement affichés à l'écran, et la fenêtre du jeu se trouvait au-dessus de celle de PSResigner à cet endroit. Fix : `SetForegroundWindow`/`ShowWindow` sur le HWND de PSResigner avant la capture, pour la ramener au premier plan.
+
 ## Prochaine étape
 
-1. Éventuellement le même traitement ("Log" sans cadre) si l'utilisateur le souhaite.
+1. Éventuellement le même traitement ("Log" sans cadre, ou liseré blanc façon onglets) si l'utilisateur le souhaite.
 2. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
 3. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
 4. Suite de l'embellissement si l'utilisateur en a envie (barre de titre native sombre sous Windows, etc.).

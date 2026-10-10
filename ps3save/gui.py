@@ -41,9 +41,12 @@ HASH_NAMES = {0: "FILE", 1: "FILE_CID", 2: "FILE_DHK_CID2", 3: "FILE_AID_UID"}
 def _round_window_corners(window: tk.Tk) -> None:
     """Windows 11 renders DWM-composited windows with rounded corners by
     default, but a bare Tk toplevel doesn't opt into that -- ask for it
-    explicitly via DWMWA_WINDOW_CORNER_PREFERENCE. No-op on Mac/Linux
-    (already rounded/themed by the OS) and silently ignored on Windows
-    versions that don't know this attribute (10 and earlier)."""
+    explicitly via DWMWA_WINDOW_CORNER_PREFERENCE, and give the thin system
+    border DWM draws around the window a white DWMWA_BORDER_COLOR (default
+    is an unobtrusive gray that barely reads as a border at all against a
+    busy background image). No-op on Mac/Linux (already rounded/themed by
+    the OS) and silently ignored on Windows versions that don't know these
+    attributes (10 and earlier)."""
     if sys.platform != "win32":
         return
     try:
@@ -52,11 +55,18 @@ def _round_window_corners(window: tk.Tk) -> None:
         window.update_idletasks()
         GA_ROOT = 2
         hwnd = ctypes.windll.user32.GetAncestor(window.winfo_id(), GA_ROOT)
+
         DWMWA_WINDOW_CORNER_PREFERENCE = 33
         DWMWCP_ROUND = 2
-        value = ctypes.c_int(DWMWCP_ROUND)
+        corner = ctypes.c_int(DWMWCP_ROUND)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(value), ctypes.sizeof(value)
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(corner), ctypes.sizeof(corner)
+        )
+
+        DWMWA_BORDER_COLOR = 34
+        white = ctypes.c_int(0x00FFFFFF)  # COLORREF: 0x00BBGGRR
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_BORDER_COLOR, ctypes.byref(white), ctypes.sizeof(white)
         )
     except (AttributeError, OSError):
         pass
@@ -136,8 +146,6 @@ class App(ttk.Frame):
         self._build_notebook()
         self._build_log()
 
-        master.rowconfigure(3, weight=1)
-
         self.apply_theme()
 
     # ---- background image -----------------------------------------------
@@ -182,6 +190,7 @@ class App(ttk.Frame):
         dark = self.dark_var.get()
         theme.apply_ttk_style(self.master, dark)
         theme.style_text_widget(self.log_text, dark)
+        self._content_border.configure(background=theme.palette(dark)["bg"])
 
     def on_toggle_theme(self) -> None:
         self.apply_theme()
@@ -233,19 +242,54 @@ class App(ttk.Frame):
 
         self.icon_image: tk.PhotoImage | None = None
         self.icon_label = ttk.Label(box)
-        self.icon_label.grid(row=0, column=3, rowspan=5, sticky="n", padx=(4, 4))
+        self.icon_label.grid(row=0, column=3, rowspan=5, padx=(4, 4))
 
     def _build_notebook(self) -> None:
-        self.notebook = ttk.Notebook(self.master)
-        self.notebook.grid(row=2, column=0, sticky="ew", padx=14, pady=(7, 7))
+        """Hand-rolled tab switcher instead of ttk.Notebook: a Notebook is
+        one single rectangle sized to fit its widest tab's content, so the
+        tab strip's row is forced to that same width too -- the empty space
+        beside the tab labels is opaque (notebook background), not a gap,
+        and no style tweak can make it show the background image through.
+        Two plain buttons + two separately-gridded frames (only one shown
+        at a time, via grid()/grid_remove()) don't have that problem: the
+        button row is only as wide as the two buttons.
 
-        resign_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
-        cheats_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
-        self.notebook.add(resign_tab, text="Resign")
-        self.notebook.add(cheats_tab, text="Cheats")
+        The content frames sit inside a plain tk.Frame with a white
+        highlight ring -- a "page" look, like a Notebook's content pane --
+        but the ring wraps only the content, not the tab row above it, so
+        it can never reintroduce the dead space the Notebook replacement
+        was built to get rid of."""
+        tab_bar = ttk.Frame(self.master)
+        tab_bar.grid(row=2, column=0, sticky="w", padx=14, pady=(7, 0))
 
-        self._build_resign_tab(resign_tab)
-        self._build_cheats_tab(cheats_tab)
+        content_border = tk.Frame(self.master, highlightthickness=1,
+                                   highlightbackground="white", highlightcolor="white", bd=0)
+        content_border.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 7))
+        content_border.columnconfigure(0, weight=1)
+        self._content_border = content_border
+
+        self._tab_frames: dict[str, ttk.Frame] = {}
+        self._tab_buttons: dict[str, ttk.Button] = {}
+
+        for key, label in (("resign", "Resign"), ("cheats", "Cheats")):
+            btn = ttk.Button(tab_bar, text=label, command=lambda k=key: self._select_tab(k))
+            btn.pack(side="left", padx=(0, 2))
+            self._tab_buttons[key] = btn
+
+            frame = ttk.Frame(content_border, padding=8)
+            frame.grid(row=0, column=0, sticky="ew")
+            self._tab_frames[key] = frame
+
+        self._build_resign_tab(self._tab_frames["resign"])
+        self._build_cheats_tab(self._tab_frames["cheats"])
+
+        self._select_tab("resign")
+
+    def _select_tab(self, key: str) -> None:
+        for k, frame in self._tab_frames.items():
+            (frame.grid if k == key else frame.grid_remove)()
+        for k, btn in self._tab_buttons.items():
+            btn.configure(style="Accent.TButton" if k == key else "TButton")
 
     def _build_resign_tab(self, parent: ttk.Frame) -> None:
         identity = ttk.Frame(parent)
@@ -440,11 +484,11 @@ class App(ttk.Frame):
 
     def _build_log(self) -> None:
         box = ttk.LabelFrame(self.master, text="Log")
-        box.grid(row=3, column=0, sticky="nsew", padx=14, pady=(7, 14))
+        box.grid(row=4, column=0, sticky="nsew", padx=14, pady=(7, 14))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
-        self.log_text = tk.Text(box, height=12, state="disabled", wrap="word")
+        self.log_text = tk.Text(box, height=5, state="disabled", wrap="word")
         self.log_text.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(box, command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
