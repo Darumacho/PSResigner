@@ -479,6 +479,33 @@ Les deux `.exe` sont reconstruits avec ce changement.
 2. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
 3. Suite de l'embellissement si l'utilisateur en a envie (en-têtes de section colorés, barre de titre native sombre sous Windows, etc.).
 
+## Image de fond (discrète) — fait
+
+L'utilisateur a ajouté `resources/BackgroundMain.jpg` (2560×1440) et `resources/BackgroundMain.png` (en réalité un JPEG 1280×720, juste mal nommé — vérifié par les octets magiques, `FFD8FF...` = JPEG, pas `89504E47` = PNG).
+
+**Point bloquant identifié avant de coder** : `tkinter.PhotoImage` ne sait pas charger de JPEG nativement (seulement GIF/PNG/PPM). Signalé à l'utilisateur, avec le compromis associé (image derrière des panneaux opaques = visible seulement dans les marges, pas un vrai habillage plein cadre) — **choix validé avec lui avant d'implémenter** : nouvelle dépendance **Pillow**, et un rendu "discret" (liseré dans la marge) plutôt qu'un relookage complet.
+
+- `pyproject.toml` : ajout de `Pillow`.
+- `ps3save/gui.py` : import `PIL.Image`/`PIL.ImageTk` dans un `try/except ImportError` (dégrade proprement si Pillow absent, pas de crash). `App._build_background()` charge `resources/BackgroundMain.jpg`, pose un `tk.Label` en `place(relwidth=1, relheight=1)` sur **`self.master` (la fenêtre racine)**, abaissé (`.lower()`) sous le frame principal. Le frame principal (`self`) garde son fond opaque (géré par `theme.py`) mais est maintenant griddé avec une marge (`padx=14, pady=14`) au lieu de remplir 100% de la fenêtre — c'est cette marge qui laisse voir l'image en dessous. Redimensionnement de l'image sur `<Configure>` (avec un cache `_bg_size` pour éviter de retraiter l'image à chaque micro-event).
+
+**Testé** : capture d'écran (clair/sombre non re-testés séparément, le fond ne dépend pas du thème) confirmant le liseré bleu/sombre discret autour des panneaux ; validé par l'utilisateur ("ça me convient pour l'instant") avant recompilation. Vérifié aussi dans l'exe PyInstaller figé — Pillow se bundle correctement (taille de l'exe passée de ~13 Mo à ~33 Mo, attendu), le fond s'affiche bien.
+
+## Espacement entre sections pour laisser voir le fond — fait
+
+Demande : alléger l'interface en espaçant les 4 sections principales (`Save folder`, `Save info`, le volet Resign/Cheats, `Log`) pour que le fond apparaisse aussi *entre* elles, pas juste sur le pourtour extérieur.
+
+**Restructuration nécessaire** : jusqu'ici, les 4 sections étaient griddées à l'intérieur d'un seul grand `ttk.Frame` (`App` elle-même, opaque) qui remplissait toute la fenêtre avec juste une marge extérieure de 14px — un espacement entre sections resterait donc coloré par le fond opaque du frame, pas par l'image. Pour que le fond soit visible entre les sections, chacune doit être sa propre cellule de grille **directement sur la fenêtre racine (`self.master`)**, pas imbriquée dans un conteneur commun.
+
+- `ps3save/gui.py` : `App` n'est plus griddée du tout (reste une instance `ttk.Frame` inutilisée comme conteneur, inoffensif). Les 4 méthodes `_build_folder_row`/`_build_info_panel`/`_build_notebook`/`_build_log` prennent maintenant `self.master` comme parent et se griddent chacune sur une ligne de la fenêtre racine (`row=0..3`), avec `padx=14` partout et un `pady` calculé pour un espacement uniforme de 14px (marge extérieure ET entre sections) : `(14,7)` / `(7,7)` / `(7,7)` / `(7,14)`. `master.rowconfigure(3, weight=1)` (la ligne du Log) fait le lien avec l'extensibilité verticale, à la place de l'ancien `self.rowconfigure`/`columnconfigure`.
+
+**Testé** : scénario resign complet rejoué après la restructuration (`check_file_hashes` correct, pas de régression) ; capture d'écran confirmant le fond bien visible entre chaque section désormais, pas seulement autour. Les deux `.exe` sont reconstruits.
+
+## Prochaine étape
+
+1. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
+2. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
+3. Suite de l'embellissement si l'utilisateur en a envie (vrai habillage plein cadre avec panneaux semi-transparents, en-têtes de section colorés, barre de titre native sombre sous Windows, etc.).
+
 ## Références (à re-télécharger si besoin, non copiées dans ce repo)
 
 - https://github.com/bucanero/pfd_sfo_tools (pfdtool original de flatz, GPL) — fichiers clés : `pfdtool/src/pfd.c`, `pfd_internal.h`, `backend.c`, `util.c`

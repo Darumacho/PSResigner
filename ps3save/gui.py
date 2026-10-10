@@ -15,6 +15,12 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
 from . import games_conf, theme
 from .cheats import (
     CheatEntry,
@@ -87,8 +93,7 @@ class App(ttk.Frame):
                 master.iconphoto(True, self._app_icon)
             except tk.TclError:
                 pass
-        self.grid(row=0, column=0, sticky="nsew")
-        master.rowconfigure(0, weight=1)
+        self._build_background()
         master.columnconfigure(0, weight=1)
 
         self.save_dir: Path | None = None
@@ -106,10 +111,45 @@ class App(ttk.Frame):
         self._build_notebook()
         self._build_log()
 
-        self.rowconfigure(3, weight=1)
-        self.columnconfigure(0, weight=1)
+        master.rowconfigure(3, weight=1)
 
         self.apply_theme()
+
+    # ---- background image -----------------------------------------------
+
+    def _build_background(self) -> None:
+        """A discreet background image behind the window -- visible only in
+        the margin left around the main frame (ttk panels are opaque, so
+        it wouldn't otherwise show through). Needs Pillow (the only image
+        format we have is JPEG, which plain tkinter can't load); silently
+        skipped if Pillow isn't installed."""
+        if Image is None:
+            return
+        path = _resource_path("resources", "BackgroundMain.jpg")
+        if not path.exists():
+            return
+        try:
+            self._bg_source = Image.open(path)
+        except OSError:
+            return
+
+        self._bg_label = tk.Label(self.master, borderwidth=0)
+        self._bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+        self._bg_label.lower()
+        self.master.bind("<Configure>", self._resize_background)
+        self._resize_background()
+
+    def _resize_background(self, _event=None) -> None:
+        if Image is None or not hasattr(self, "_bg_source"):
+            return
+        self.master.update_idletasks()
+        w, h = max(self.master.winfo_width(), 1), max(self.master.winfo_height(), 1)
+        if getattr(self, "_bg_size", None) == (w, h):
+            return
+        self._bg_size = (w, h)
+        resized = self._bg_source.resize((w, h), Image.LANCZOS)
+        self._bg_image = ImageTk.PhotoImage(resized)
+        self._bg_label.configure(image=self._bg_image)
 
     # ---- theme ---------------------------------------------------------
 
@@ -130,8 +170,8 @@ class App(ttk.Frame):
     # ---- layout ---------------------------------------------------
 
     def _build_folder_row(self) -> None:
-        row = ttk.Frame(self)
-        row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        row = ttk.Frame(self.master)
+        row.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 7))
         row.columnconfigure(1, weight=1)
 
         ttk.Label(row, text="Save folder:").grid(row=0, column=0, sticky="w")
@@ -146,8 +186,8 @@ class App(ttk.Frame):
         ).grid(row=0, column=3, padx=(12, 0))
 
     def _build_info_panel(self) -> None:
-        box = ttk.LabelFrame(self, text="Save info")
-        box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        box = ttk.LabelFrame(self.master, text="Save info")
+        box.grid(row=1, column=0, sticky="ew", padx=14, pady=(7, 7))
         box.columnconfigure(1, weight=2, minsize=220)
 
         self.info_labels: dict[str, tk.StringVar] = {}
@@ -171,8 +211,8 @@ class App(ttk.Frame):
         self.icon_label.grid(row=0, column=3, rowspan=5, sticky="n", padx=(4, 4))
 
     def _build_notebook(self) -> None:
-        self.notebook = ttk.Notebook(self)
-        self.notebook.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        self.notebook = ttk.Notebook(self.master)
+        self.notebook.grid(row=2, column=0, sticky="ew", padx=14, pady=(7, 7))
 
         resign_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
         cheats_tab = ttk.Frame(self.notebook, padding=(0, 8, 0, 0))
@@ -374,8 +414,8 @@ class App(ttk.Frame):
         self.refresh_info()
 
     def _build_log(self) -> None:
-        box = ttk.LabelFrame(self, text="Log")
-        box.grid(row=3, column=0, sticky="nsew")
+        box = ttk.LabelFrame(self.master, text="Log")
+        box.grid(row=3, column=0, sticky="nsew", padx=14, pady=(7, 14))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
 
