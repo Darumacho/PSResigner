@@ -500,11 +500,39 @@ Demande : alléger l'interface en espaçant les 4 sections principales (`Save fo
 
 **Testé** : scénario resign complet rejoué après la restructuration (`check_file_hashes` correct, pas de régression) ; capture d'écran confirmant le fond bien visible entre chaque section désormais, pas seulement autour. Les deux `.exe` sont reconstruits.
 
+## Bande vide dans l'onglet Notebook + coins de fenêtre arrondis — faits
+
+L'utilisateur a repéré (capture à l'appui) une bande vide encadrée à droite des onglets "Resign"/"Cheats", et a demandé des coins de fenêtre arrondis pour adoucir le rendu.
+
+- **Bande vide** : `ttk.Notebook` en thème `clam` dessine une bordure autour de toute la largeur de la bande d'onglets, y compris l'espace inutilisé à droite des onglets eux-mêmes (plus étroits que le panneau de contenu en dessous) — ça donnait l'impression d'une boîte vide. Fix dans `theme.py` : `style.configure("TNotebook", ..., borderwidth=0)`. Testé par capture : la bande disparaît, ne restent que les onglets.
+- **Coins arrondis** : Windows 11 arrondit nativement les fenêtres composées par DWM, mais une fenêtre Tk brute n'active pas cet opt-in. Ajout de `_round_window_corners(window)` dans `gui.py` (nouvelle fonction module-level) : appelle `DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE=33, DWMWCP_ROUND=2)` via `ctypes`, en remontant au vrai HWND top-level via `GetAncestor(hwnd, GA_ROOT)` (celui que `winfo_id()` renvoie n'est pas garanti être le top-level). No-op silencieux hors Windows (Mac/Linux arrondissent déjà nativement) ou sur Windows <11 (attribut inconnu, échec silencieux). Appliqué à la fenêtre principale et à la fenêtre Profiles (`ProfilesDialog`).
+
+**Testé** : capture d'écran zoomée sur le coin supérieur gauche de la fenêtre réelle (pas juste le contenu, la fenêtre OS complète cette fois) → le fond du bureau apparaît bien au coin, confirmant l'arrondi. Les deux `.exe` sont reconstruits et le lancement de l'exe figé a été revérifié (pas de crash lié à `ctypes`/`dwmapi`).
+
+## Suppression des cadres "boîte dans la boîte" (Save info + Target identity) — fait
+
+Nouvelle demande de l'utilisateur suite au fix des coins arrondis : il désignait en réalité un autre souci — certains panneaux ont un cadre extérieur (`ttk.LabelFrame`, bordure + titre) qui enveloppe des widgets ayant déjà leur propre bordure naturelle (le tableau de fichiers, les champs Entry), créant un effet de double-boîte redondant ("fenêtre mère" + "sous-fenêtre" dans ses mots).
+
+**Fausse piste initiale, abandonnée avant d'aller trop loin** : j'ai d'abord commencé à construire un composant `RoundedPanel` (Canvas dessiné à la main avec coins arrondis, dans un nouveau `ps3save/widgets.py`) en pensant que la demande portait sur l'arrondi des panneaux internes. Après une capture de clarification avec l'utilisateur, il s'est avéré que la vraie demande était plus simple : juste **retirer le cadre extérieur**, pas le redessiner en rond. Fichier `widgets.py` supprimé avant intégration — rien de perdu, juste du temps de recherche, mais bon réflexe d'avoir clarifié par capture avant de pousser plus loin une mauvaise direction.
+
+**Fix réel** : `ttk.LabelFrame(parent, text="...")` → `ttk.Frame(parent)` (sans texte, sans bordure) pour :
+- `_build_info_panel` ("Save info") — les champs Title/Sub-title/etc. flottent maintenant librement, seul le tableau de fichiers garde sa bordure propre.
+- `_build_resign_tab` ("Target identity") — même traitement, les champs Console ID/User ID/Account ID flottent directement sous les onglets.
+
+`_build_log` ("Log") a le même motif mais n'a pas été demandé cette fois — laissé tel quel, à voir si l'utilisateur veut le même traitement plus tard.
+
+**Testé** : capture d'écran après chaque changement (effet confirmé, pas de double-boîte) + scénario resign complet rejoué (`check_file_hashes` correct, pas de régression). Les deux `.exe` sont reconstruits.
+
+## Bordure résiduelle du panneau de contenu du Notebook — tentative annulée
+
+L'utilisateur a signalé une "longue bande à côté des onglets". J'ai diagnostiqué et corrigé la bordure de `Notebook.client` (élément utilisant `bordercolor`/`lightcolor`/`darkcolor`, pas `borderwidth` — d'où l'inefficacité du fix précédent) en l'alignant sur la couleur de fond. **L'utilisateur a indiqué que ça ne correspondait pas à ce qu'il voulait** et a demandé à revenir en arrière pour réexpliquer — `theme.py` restauré à l'état d'avant cette tentative (juste `borderwidth=0`/`bordercolor=c["border"]`, sans les lignes `lightcolor`/`darkcolor`). Le diagnostic technique sur `Notebook.client` reste valable et pourra être réutilisé une fois la vraie demande clarifiée.
+
 ## Prochaine étape
 
-1. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
-2. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
-3. Suite de l'embellissement si l'utilisateur en a envie (vrai habillage plein cadre avec panneaux semi-transparents, en-têtes de section colorés, barre de titre native sombre sous Windows, etc.).
+1. Éventuellement le même traitement ("Log" sans cadre) si l'utilisateur le souhaite.
+2. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
+3. Éventuellement le type `4` (multi-write) pour les cheats, pour pousser la couverture au-delà de 93%.
+4. Suite de l'embellissement si l'utilisateur en a envie (barre de titre native sombre sous Windows, etc.).
 
 ## Références (à re-télécharger si besoin, non copiées dans ce repo)
 

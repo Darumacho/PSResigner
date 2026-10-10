@@ -38,6 +38,30 @@ from .sfo import SfoError, SfoFile
 HASH_NAMES = {0: "FILE", 1: "FILE_CID", 2: "FILE_DHK_CID2", 3: "FILE_AID_UID"}
 
 
+def _round_window_corners(window: tk.Tk) -> None:
+    """Windows 11 renders DWM-composited windows with rounded corners by
+    default, but a bare Tk toplevel doesn't opt into that -- ask for it
+    explicitly via DWMWA_WINDOW_CORNER_PREFERENCE. No-op on Mac/Linux
+    (already rounded/themed by the OS) and silently ignored on Windows
+    versions that don't know this attribute (10 and earlier)."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        window.update_idletasks()
+        GA_ROOT = 2
+        hwnd = ctypes.windll.user32.GetAncestor(window.winfo_id(), GA_ROOT)
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2
+        value = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except (AttributeError, OSError):
+        pass
+
+
 def _resource_path(*parts: str) -> Path:
     """Resolve a bundled resource both running from source (project root is
     two levels up from this file) and frozen by PyInstaller (extracted
@@ -85,6 +109,7 @@ class App(ttk.Frame):
         self.master = master
         master.title("PSResigner")
         master.geometry("780x720")
+        _round_window_corners(master)
 
         icon_path = _resource_path("resources", "app_logo.png")
         if icon_path.exists():
@@ -186,7 +211,7 @@ class App(ttk.Frame):
         ).grid(row=0, column=3, padx=(12, 0))
 
     def _build_info_panel(self) -> None:
-        box = ttk.LabelFrame(self.master, text="Save info")
+        box = ttk.Frame(self.master)
         box.grid(row=1, column=0, sticky="ew", padx=14, pady=(7, 7))
         box.columnconfigure(1, weight=2, minsize=220)
 
@@ -223,7 +248,7 @@ class App(ttk.Frame):
         self._build_cheats_tab(cheats_tab)
 
     def _build_resign_tab(self, parent: ttk.Frame) -> None:
-        identity = ttk.LabelFrame(parent, text="Target identity")
+        identity = ttk.Frame(parent)
         identity.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         ttk.Label(identity, text="Console ID (32 hex chars):").grid(row=0, column=0, sticky="w", padx=4)
@@ -681,6 +706,7 @@ class ProfilesDialog(tk.Toplevel):
         self.title("Profiles")
         self.geometry("640x410")
         self.transient(app.master)
+        _round_window_corners(self)
 
         try:
             self.profiles = load_profiles()
