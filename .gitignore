@@ -10,3 +10,9 @@ dist/
 
 # Backups created by resign (in-place mode)
 PARAM.PFD.bak
+
+# Editable install metadata
+*.egg-info/
+
+# macOS Finder metadata
+.DS_Store

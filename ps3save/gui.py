@@ -128,7 +128,9 @@ class App(ttk.Frame):
         super().__init__(master, padding=10)
         self.master = master
         master.title("PSResigner")
-        master.geometry("780x720")
+        # macOS: wider/shorter default (952x702 on screen incl. the 32pt
+        # title bar) -- Aqua widgets and fonts run larger than on Windows.
+        master.geometry("952x670" if sys.platform == "darwin" else "780x720")
         _round_window_corners(master)
 
         icon_path = _resource_path("resources", "app_logo.png")
@@ -184,11 +186,22 @@ class App(ttk.Frame):
         self.master.bind("<Configure>", self._resize_background)
         self._resize_background()
 
-    def _resize_background(self, _event=None) -> None:
+    def _resize_background(self, event=None) -> None:
         if Image is None or not hasattr(self, "_bg_source"):
             return
-        self.master.update_idletasks()
-        w, h = max(self.master.winfo_width(), 1), max(self.master.winfo_height(), 1)
+        # A <Configure> binding on the toplevel also fires for every child
+        # widget -- only the window's own events matter here. Take the size
+        # from the event rather than update_idletasks() + winfo_*: forcing
+        # an idle update from inside <Configure> while the window first maps
+        # makes Tk 9 on macOS drop the requested geometry (window came up
+        # at Tk's default 200x200).
+        if event is not None and event.widget is not self.master:
+            return
+        if event is not None:
+            w, h = event.width, event.height
+        else:
+            w, h = self.master.winfo_width(), self.master.winfo_height()
+        w, h = max(w, 1), max(h, 1)
         if getattr(self, "_bg_size", None) == (w, h):
             return
         self._bg_size = (w, h)

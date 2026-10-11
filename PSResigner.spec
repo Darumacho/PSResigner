@@ -34,34 +34,76 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('resources', 'resources')] + tkdnd_datas,
-    hiddenimports=['tkinterdnd2'],
+    hiddenimports=['tkinterdnd2', 'certifi'],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/rth_certifi.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='PSResigner',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['resources/app_logo.ico'],
-)
+if platform.system() == "Darwin":
+    # macOS: onedir + BUNDLE -> PSResigner.app (PyInstaller deprecates
+    # onefile inside a .app bundle: slow startup, breaks codesigning). No
+    # UPX on Mac either, it corrupts signed Mach-O binaries.
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='PSResigner',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name='PSResigner',
+    )
+    app = BUNDLE(
+        coll,
+        name='PSResigner.app',
+        icon='resources/app_logo.icns',
+        bundle_identifier='fr.free.psresigner',
+        info_plist={
+            'CFBundleDisplayName': 'PSResigner',
+            'CFBundleShortVersionString': '0.1.0',
+            'NSHighResolutionCapable': True,
+            'NSRequiresAquaSystemAppearance': False,
+        },
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='PSResigner',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=['resources/app_logo.ico'],
+    )
