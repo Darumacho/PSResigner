@@ -11,6 +11,7 @@ dependencies = [
     "pycryptodome",
     "Pillow",
     "tkinterdnd2",
+    "certifi",
 ]
 
 [project.scripts]

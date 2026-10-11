@@ -638,6 +638,21 @@ Nouvelle session (2026-10-11). L'utilisateur a branché une vraie clé USB (lect
 
 **Testé** (headless, conformément à [[feedback-no-screenshots]]) : scan réel sur la clé USB connectée -- 7 dossiers trouvés en 0.05s (scan de 26 lettres de lecteur inclus), titres lus correctement pour chacun (`"God of War: Ascension (EU)"`, `"Ratchet & Clank 3"`, etc.). Sélection + `on_load()` confirmée : charge bien le bon dossier dans la fenêtre principale et ferme le dialogue. Scénario `check hashes` rejoué après chargement depuis la clé (lecture seule, pas de régression). Exe figé lancé 5s sans crash. `PSResigner.exe` reconstruit.
 
+## Distribution Mac (pull) + dépendance `certifi` manquante sous Windows — fait
+
+L'utilisateur a préparé la distribution Mac directement sur sa machine Mac (commit `7d733c8 "Distribution Mac"`) et l'a pushée/pullée dans ce repo Windows. Changements apportés côté Mac, relus après le pull :
+
+- `PSResigner.spec` : branche `platform.system() == "Darwin"` séparée -- `EXE(..., exclude_binaries=True)` + `COLLECT` + `BUNDLE` pour produire un vrai `PSResigner.app` (icône `.icns`, `bundle_identifier`, `Info.plist`), sans UPX (corrompt les binaires Mach-O signés). La branche Windows (onefile classique) reste inchangée dans sa logique.
+- Nouveau hook runtime `hooks/rth_certifi.py` : force `SSL_CERT_FILE` vers le magasin de certificats de `certifi` avant toute requête HTTPS (cheats/`games.conf`) -- nécessaire parce que le Python officiel macOS (python.org) pointe OpenSSL vers un `cert.pem` qui n'existe que si l'utilisateur a lancé `Install Certificates.command`, ce qui n'est jamais le cas chez un utilisateur final. Enregistré dans `runtime_hooks=` des deux `.spec` (GUI et CLI), avec `certifi` en `hiddenimports`.
+- `gui.py` : géométrie de fenêtre par défaut différente sous macOS (`952x670` contre `780x720` sous Windows -- les widgets Aqua et les polices sont plus grands), et fix de `_resize_background()` pour Tk 9 sur macOS : forcer `update_idletasks()`/`winfo_width()` depuis l'intérieur d'un handler `<Configure>` au premier affichage de la fenêtre faisait retomber la géométrie demandée à 200x200 par défaut -- la taille vient maintenant directement de l'objet `event` (et on ignore les évènements `<Configure>` des widgets enfants, qui remontent aussi via le binding sur `self.master`).
+- `resources/app_logo.icns` ajouté, `.gitignore` complété (`*.egg-info/`, `.DS_Store`).
+
+**Bug trouvé en relisant/testant côté Windows** : `certifi` n'est déclaré nulle part dans `pyproject.toml` et n'était pas installé sur cette machine Windows -- `hiddenimports=['certifi']` ne suffit pas à le faire exister, PyInstaller logue juste `ERROR: Hidden import 'certifi' not found` et continue le build sans lever d'exception. Confirmé en relançant l'exe fraîchement reconstruit : `ModuleNotFoundError: No module named 'certifi'` levée par `rth_certifi.py` dès le démarrage -- **les deux exe Windows étaient donc cassés** après le pull, avant correction.
+
+**Fix** : `certifi` ajouté aux dépendances de `pyproject.toml`, installé (`pip install certifi`), les deux `.spec` reconstruits en `--clean`. Vérifié que `PSResignerCLI.exe info ...` fonctionne à nouveau et que `PSResigner.exe` affiche bien sa fenêtre (process + titre de fenêtre confirmés via PowerShell, pas de capture d'écran -- cf. [[feedback-no-screenshots]]). Les deux exe Windows sont reconstruits avec `certifi` correctement embarqué.
+
+**À surveiller** : si l'utilisateur rebuild sur son Mac sans avoir installé `certifi` dans son propre environnement Python (`pip install -e .` devrait suffire maintenant que c'est dans `pyproject.toml`), le même crash se reproduirait côté Mac.
+
 ## Prochaine étape
 
 1. Backlog de features discuté mais pas encore planifié (voir `project_next_steps.md` dans la mémoire Claude -- ne vit pas dans ce repo) : type `4` (multi-write) pour les cheats, re-vérification automatique des hashs après resign, bouton "Annuler le dernier resign", export/import des profils, validation d'intégrité pré-resign, mode "dry run".

@@ -61,9 +61,12 @@ Requires Python 3.10+.
 pip install -e .
 ```
 
-This pulls in the three runtime dependencies: `pycryptodome` (AES for
-the PFD signature), `Pillow` (loading the JPEG background image), and
-`tkinterdnd2` (drag-and-drop support for the GUI).
+This pulls in the runtime dependencies: `pycryptodome` (AES for the PFD
+signature), `Pillow` (loading the JPEG background image), `tkinterdnd2`
+(drag-and-drop support for the GUI), and `certifi` (a trusted CA bundle
+for HTTPS requests to the cheats/games.conf database — needed because
+python.org's own macOS builds don't ship a working one out of the box;
+harmless elsewhere).
 
 ## Running
 
@@ -91,7 +94,9 @@ pyinstaller PSResignerCLI.spec    # PSResignerCLI.exe / PSResignerCLI — CLI
 `PSResigner.spec` bundles `tkinterdnd2`'s native `tkdnd` extension for
 whichever platform it's built on, so it has to be run separately on
 each target OS — there's no cross-compiling a Windows build from macOS
-or vice versa.
+or vice versa. On macOS it produces a proper `PSResigner.app` bundle
+(onedir + `BUNDLE`, its own `.icns` icon, no UPX — UPX corrupts signed
+Mach-O binaries) instead of a single onefile executable.
 
 ## How it works
 
