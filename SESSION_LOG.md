@@ -627,9 +627,20 @@ L'utilisateur a demandé en amont si on pouvait déduire la région (EU/NA/JP/As
 
 **Testé** : script headless confirmant `region_label()` sur tous les préfixes connus (`BCES`→EU, `BLUS`→NA, `BLJM`→JP, `BCAS`/`BLAS`→Asia, `NP**`→variante Digital, codes inconnus→`None`) et sur les 4 sauvegardes de test réelles (dédoublonnage du cas `(EU)` confirmé). `PSResigner.exe` reconstruit.
 
+## Détection d'une PS3 montée en USB — fait
+
+Nouvelle session (2026-10-11). L'utilisateur a branché une vraie clé USB (lecteur `F:/`) contenant un dossier `PS3/SAVEDATA/` (layout standard utilisé par la sauvegarde "Copier vers périphérique USB" de la PS3 elle-même, et par multiMAN) avec 7 vraies sauvegardes dedans, pour tester cette feature du backlog.
+
+**Implémentation** : nouveau module `ps3save/usb_scan.py` :
+- `_candidate_roots()` énumère les lecteurs/volumes montés selon la plateforme : lettres `A:`-`Z:` sur Windows (`Path(f"{letter}:\\").exists()`, aucune dépendance type `pywin32` nécessaire), `/Volumes/*` sur Mac, `/media/*/*` et `/mnt/*` sur Linux. Chaque lecteur qui lève une `OSError` à l'interrogation (ex: lecteur optique vide) est simplement ignoré plutôt que de faire échouer tout le scan.
+- `find_ps3_save_folders()` : pour chaque racine, vérifie `<root>/PS3/SAVEDATA/`, puis ne retient que les sous-dossiers contenant effectivement un `PARAM.PFD`.
+- `gui.py` : nouveau bouton "Scan USB..." dans la ligne `Save folder` (entre "Browse..." et "Dark mode"). Ouvre `UsbScanDialog` (même famille que `ProfilesDialog`/`HistoryDialog`) : Treeview (Lecteur / Dossier / Titre -- le titre est lu depuis `PARAM.SFO` pour chaque résultat, au mieux, "-" si illisible), bouton "Load" (ou double-clic) qui appelle `_load_save_folder()` et ferme la fenêtre, bouton "Rescan".
+
+**Testé** (headless, conformément à [[feedback-no-screenshots]]) : scan réel sur la clé USB connectée -- 7 dossiers trouvés en 0.05s (scan de 26 lettres de lecteur inclus), titres lus correctement pour chacun (`"God of War: Ascension (EU)"`, `"Ratchet & Clank 3"`, etc.). Sélection + `on_load()` confirmée : charge bien le bon dossier dans la fenêtre principale et ferme le dialogue. Scénario `check hashes` rejoué après chargement depuis la clé (lecture seule, pas de régression). Exe figé lancé 5s sans crash. `PSResigner.exe` reconstruit.
+
 ## Prochaine étape
 
-1. Backlog de features discuté mais pas encore planifié (voir `project_next_steps.md` dans la mémoire Claude -- ne vit pas dans ce repo) : type `4` (multi-write) pour les cheats, re-vérification automatique des hashs après resign, bouton "Annuler le dernier resign", export/import des profils, validation d'intégrité pré-resign, mode "dry run", détection d'une PS3 montée en USB.
+1. Backlog de features discuté mais pas encore planifié (voir `project_next_steps.md` dans la mémoire Claude -- ne vit pas dans ce repo) : type `4` (multi-write) pour les cheats, re-vérification automatique des hashs après resign, bouton "Annuler le dernier resign", export/import des profils, validation d'intégrité pré-resign, mode "dry run".
 2. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
 3. Suite de l'embellissement si l'utilisateur en a envie (ex: même traitement "Log" sans cadre, ou liseré blanc façon onglets).
 

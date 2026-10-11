@@ -43,6 +43,7 @@ from .profiles import Profile, ProfileError, load_profiles, save_profiles
 from .region import region_label
 from .settings import load_settings, save_settings
 from .sfo import SfoError, SfoFile
+from .usb_scan import find_ps3_save_folders
 
 HASH_NAMES = {0: "FILE", 1: "FILE_CID", 2: "FILE_DHK_CID2", 3: "FILE_AID_UID"}
 
@@ -237,9 +238,12 @@ class App(ttk.Frame):
             row, text="Browse...", image=self._icons.get("open-folder.png"), compound="left",
             command=self.on_browse,
         ).grid(row=0, column=2)
+        ttk.Button(
+            row, text="Scan USB...", command=self.on_scan_usb,
+        ).grid(row=0, column=3, padx=(6, 0))
         ttk.Checkbutton(
             row, text="Dark mode", variable=self.dark_var, command=self.on_toggle_theme
-        ).grid(row=0, column=3, padx=(12, 0))
+        ).grid(row=0, column=4, padx=(12, 0))
 
     def _build_info_panel(self) -> None:
         box = ttk.Frame(self.master)
@@ -830,6 +834,9 @@ class App(ttk.Frame):
     def on_open_history(self) -> None:
         HistoryDialog(self)
 
+    def on_scan_usb(self) -> None:
+        UsbScanDialog(self)
+
 
 class ProfilesDialog(tk.Toplevel):
     """Named Owner profiles: pick one to fill in the main window's User ID
@@ -1095,6 +1102,76 @@ class HistoryDialog(tk.Toplevel):
         clear_history()
         self.entries = []
         self._refresh_list()
+
+
+class UsbScanDialog(tk.Toplevel):
+    """Lists every PS3 save folder found under <drive>/PS3/SAVEDATA/ on
+    any currently mounted drive -- the layout the PS3 itself (and tools
+    like multiMAN) write to when backing up saves to a USB stick."""
+
+    def __init__(self, app: App):
+        super().__init__(app.master)
+        self.app = app
+        self.title("Scan USB")
+        self.geometry("640x380")
+        self.transient(app.master)
+        _round_window_corners(self)
+
+        self.found: list[Path] = []
+
+        self._build()
+        self.configure(background=theme.palette(app.dark_var.get())["bg"])
+        self.on_rescan()
+
+    def _build(self) -> None:
+        self.status_var = tk.StringVar(value="Scanning...")
+        ttk.Label(self, textvariable=self.status_var).pack(fill="x", padx=10, pady=(10, 4), anchor="w")
+
+        columns = ("drive", "folder", "title")
+        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=12)
+        self.tree.heading("drive", text="Drive")
+        self.tree.heading("folder", text="Save folder")
+        self.tree.heading("title", text="Title")
+        self.tree.column("drive", width=60, anchor="center")
+        self.tree.column("folder", width=200)
+        self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.tree.bind("<Double-Button-1>", lambda _e: self.on_load())
+
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(buttons, text="Load", command=self.on_load).pack(side="left")
+        ttk.Button(buttons, text="Rescan", command=self.on_rescan).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+    def on_rescan(self) -> None:
+        self.status_var.set("Scanning...")
+        self.update_idletasks()
+
+        self.found = find_ps3_save_folders()
+        self.tree.delete(*self.tree.get_children())
+        for i, path in enumerate(self.found):
+            title = "-"
+            sfo_path = path / "PARAM.SFO"
+            if sfo_path.exists():
+                try:
+                    title = SfoFile.load(sfo_path).title or "-"
+                except SfoError:
+                    pass
+            self.tree.insert("", "end", iid=str(i), values=(path.drive or path.anchor, path.name, title))
+
+        if not self.found:
+            self.status_var.set("No PS3/SAVEDATA folder found on any currently mounted drive.")
+        else:
+            self.status_var.set(f"{len(self.found)} save folder(s) found.")
+
+    def on_load(self) -> None:
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("No folder selected", "Select a save folder first.", parent=self)
+            return
+        path = self.found[int(sel[0])]
+        if self.app._load_save_folder(path):
+            self.destroy()
 
 
 def main() -> None:
