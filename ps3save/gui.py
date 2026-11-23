@@ -11,7 +11,9 @@ from __future__ import annotations
 import math
 import shutil
 import sys
+import threading
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -28,7 +30,7 @@ except ImportError:
     DND_FILES = None
     TkinterDnD = None
 
-from . import games_conf, theme
+from . import __version__, games_conf, theme
 from .cheats import (
     CheatEntry,
     CheatsError,
@@ -42,6 +44,7 @@ from .profiles import Profile, ProfileError, load_profiles, save_profiles
 from .region import region_label
 from .settings import load_settings, save_settings
 from .sfo import SfoError, SfoFile
+from .update import RELEASES_URL, UpdateInfo, check_for_update, download_and_install
 from .usb_scan import find_ps3_save_folders
 
 HASH_NAMES = {0: "FILE", 1: "FILE_CID", 2: "FILE_DHK_CID2", 3: "FILE_AID_UID"}
@@ -129,7 +132,7 @@ class App(ttk.Frame):
         master.title("PSResigner")
         # macOS: wider/shorter default (952x702 on screen incl. the 32pt
         # title bar) -- Aqua widgets and fonts run larger than on Windows.
-        master.geometry("952x670" if sys.platform == "darwin" else "780x720")
+        master.geometry("952x670" if sys.platform == "darwin" else "946x795")
         _round_window_corners(master)
 
         icon_path = _resource_path("resources", "app_logo.png")
@@ -157,9 +160,64 @@ class App(ttk.Frame):
         self._build_info_panel()
         self._build_notebook()
         self._build_log()
+        self._build_version_label()
         self._setup_drag_drop()
 
         self.apply_theme()
+
+        if getattr(sys, "frozen", False):
+            self._check_for_update_async()
+
+    # ---- auto-update ------------------------------------------------
+
+    def _check_for_update_async(self) -> None:
+        def worker() -> None:
+            info = check_for_update()
+            if info is not None:
+                self.master.after(0, lambda: self._on_update_found(info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_found(self, info: UpdateInfo) -> None:
+        self._pending_update = info
+        self.update_var.set(f"Update available: v{info.version}")
+        self.update_label.grid()
+        self.update_button.grid()
+
+    def _on_update_click(self) -> None:
+        info: UpdateInfo | None = getattr(self, "_pending_update", None)
+        if info is None:
+            return
+        if not messagebox.askyesno(
+            "Update PSResigner",
+            f"Download and install v{info.version} now? PSResigner will restart.",
+        ):
+            return
+
+        self.update_button.configure(state="disabled")
+        self.log(f"Downloading update v{info.version}...")
+
+        def worker() -> None:
+            try:
+                download_and_install(
+                    info,
+                    progress=lambda pct: self.master.after(0, lambda: self.update_var.set(f"Downloading... {pct}%")),
+                )
+            except OSError as exc:
+                self.master.after(0, lambda: self._on_update_failed(str(exc)))
+                return
+            self.master.after(0, self.master.destroy)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_failed(self, message: str) -> None:
+        self.update_button.configure(state="normal")
+        self.log(f"Update failed: {message}")
+        if messagebox.askyesno(
+            "Update failed",
+            f"Couldn't download the update automatically ({message}).\n\nOpen the releases page instead?",
+        ):
+            webbrowser.open(RELEASES_URL)
 
     # ---- background image -----------------------------------------------
 
@@ -256,6 +314,14 @@ class App(ttk.Frame):
         ttk.Checkbutton(
             row, text="Dark mode", variable=self.dark_var, command=self.on_toggle_theme
         ).grid(row=0, column=4, padx=(12, 0))
+
+        self.update_var = tk.StringVar()
+        self.update_label = ttk.Label(row, textvariable=self.update_var, foreground="#2e7d32")
+        self.update_label.grid(row=0, column=5, padx=(12, 0))
+        self.update_label.grid_remove()
+        self.update_button = ttk.Button(row, text="Update...", command=self._on_update_click)
+        self.update_button.grid(row=0, column=6, padx=(6, 0))
+        self.update_button.grid_remove()
 
     def _build_info_panel(self) -> None:
         box = ttk.Frame(self.master)
@@ -535,6 +601,14 @@ class App(ttk.Frame):
         scrollbar = ttk.Scrollbar(box, command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
+
+    def _build_version_label(self) -> None:
+        """Pinned to the window's bottom-right corner via place() (not
+        grid(), so it floats independently of the row layout above and
+        stays put regardless of how the window is resized)."""
+        ttk.Label(
+            self.master, text=f"v{__version__}", font=("TkDefaultFont", 8),
+        ).place(relx=1.0, rely=1.0, x=-10, y=-4, anchor="se")
 
     # ---- helpers ----------------------------------------------------
 

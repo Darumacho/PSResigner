@@ -16,3 +16,5 @@ PARAM.PFD.bak
 
 # macOS Finder metadata
 .DS_Store
+
+test/
