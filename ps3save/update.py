@@ -112,9 +112,23 @@ def download_and_install(info: UpdateInfo, progress: Callable[[int], None] | Non
         f"""
 $proc = Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue
 if ($proc) {{ $proc.WaitForExit(30000) }}
-Start-Sleep -Milliseconds 500
+Start-Sleep -Milliseconds 1500
 Copy-Item -LiteralPath '{temp_exe}' -Destination '{current_exe}' -Force
-Start-Process -FilePath '{current_exe}'
+Start-Sleep -Milliseconds 500
+
+# The freshly-copied onefile exe occasionally fails its own self-extraction
+# on the very first launch right after being overwritten (observed as a
+# "Failed to load Python DLL" bootloader error -- a transient filesystem
+# race, not a corrupt download: the file's hash is fine and a second
+# launch always works). One silent retry covers it instead of leaving the
+# user stuck looking at that dialog after an update they didn't ask to
+# debug.
+$started = Start-Process -FilePath '{current_exe}' -PassThru
+Start-Sleep -Milliseconds 1500
+if ($started.HasExited) {{
+    Start-Process -FilePath '{current_exe}'
+}}
+
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """.strip(),
         encoding="utf-8",
