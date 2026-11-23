@@ -107,6 +107,18 @@ def aes_cbc_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
     return AES.new(key, AES.MODE_CBC, iv).encrypt(data)
 
 
+def _xor(a: bytes, b: bytes) -> bytes:
+    return (int.from_bytes(a, "big") ^ int.from_bytes(b, "big")).to_bytes(len(a), "big")
+
+
+def _counter_keystream(cipher, num_blocks: int) -> bytes:
+    """AES-ECB of the per-block counters [u64 block index, big-endian][u64 0].
+    Big-endian because Apollo/pfdtool write the counter with a native store on
+    the PS3 (PowerPC); verified against real saves (little-endian gives noise)."""
+    counters = b"".join(struct.pack(">QQ", i, 0) for i in range(num_blocks))
+    return cipher.encrypt(counters)
+
+
 def align_up(value: int, alignment: int) -> int:
     return (value + alignment - 1) & ~(alignment - 1)
 
@@ -332,6 +344,56 @@ class PfdFile:
                 return False
         return True
 
+    # ---- protected file contents ------------------------------------------
+    #
+    # In a save, every PARAM.PFD entry besides PARAM.SFO is a "secure" file whose
+    # content is encrypted (trophy sets' TROP* files are stored in the clear) (apollo-ps3 source/pfd.c, pfd_decrypt_file/pfd_encrypt_file):
+    #   file key = first 16 bytes of AES-128-CBC-decrypt(syscon_manager_key,
+    #              iv = first 16 bytes of the entry's hash key, entry.key)
+    #   block i  : plain = AES_dec(K, block) XOR AES_enc(K, counter_i)
+    #              block = AES_enc(K, plain XOR AES_enc(K, counter_i))
+    # on 16-byte blocks of the file zero-padded to FILE_SIZE_ALIGNMENT; the
+    # plain text is entry.file_size bytes long. Cheat codes (.savepatch) address
+    # the plain text, so a cheat must be applied between decrypt and encrypt.
+
+    _NOT_ENCRYPTED = ("PARAM.SFO", "TROPSYS.DAT", "TROPUSR.DAT", "TROPTRNS.DAT", "TROPCONF.SFM")
+
+    def is_encrypted(self, entry: PfdEntry) -> bool:
+        return entry.file_name.upper() not in self._NOT_ENCRYPTED
+
+    def can_decrypt_file(self, file_name: str) -> bool:
+        """Whether this file's content can be decrypted (and re-encrypted):
+        it has a PARAM.PFD entry, is encrypted, and its key is known."""
+        entry = self.find_entry(file_name)
+        if entry is None or not self.is_encrypted(entry):
+            return False
+        try:
+            self._file_key(entry)
+        except PfdError:
+            return False
+        return True
+
+    def _file_key(self, entry: PfdEntry) -> bytes:
+        if not self.is_encrypted(entry):
+            raise PfdError(f"'{entry.file_name}' is not encrypted")
+        hash_key = self._entry_hash_key(entry, HASH_FILE)   # PfdError if the secure file ID is unknown
+        return aes_cbc_decrypt(self.config.syscon_manager_key, hash_key[:16], entry.key)[:16]
+
+    def decrypt_file_data(self, entry: PfdEntry, data: bytes) -> bytes:
+        """On-disk (encrypted) content -> plain text, entry.file_size bytes long."""
+        cipher = AES.new(self._file_key(entry), AES.MODE_ECB)
+        padded = data + b"\x00" * (-len(data) % FILE_SIZE_ALIGNMENT)
+        plain = _xor(cipher.decrypt(padded), _counter_keystream(cipher, len(padded) // 16))
+        return plain[: entry.file_size]
+
+    def encrypt_file_data(self, entry: PfdEntry, plain: bytes) -> bytes:
+        """Plain text -> on-disk content (zero-padded to FILE_SIZE_ALIGNMENT).
+        Sets entry.file_size to the plain text's length."""
+        cipher = AES.new(self._file_key(entry), AES.MODE_ECB)
+        padded = plain + b"\x00" * (-len(plain) % FILE_SIZE_ALIGNMENT)
+        entry.file_size = len(plain)
+        return cipher.encrypt(_xor(padded, _counter_keystream(cipher, len(padded) // 16)))
+
     def _applicable_hash_types(self, entry: PfdEntry) -> list[int]:
         if entry.file_name.upper() != "PARAM.SFO":
             return [HASH_FILE]
@@ -378,7 +440,13 @@ class PfdFile:
                 except PfdError:
                     continue
                 entry.file_hashes[which] = hmac_sha1(hkey, data)
-            entry.file_size = len(data)
+            # An encrypted file is stored zero-padded to FILE_SIZE_ALIGNMENT while
+            # entry.file_size is its plain-text length: keep that length when the
+            # on-disk size is just its padded form (otherwise the game would read
+            # the padding as data).
+            if not (self.is_encrypted(entry)
+                    and align_up(entry.file_size, FILE_SIZE_ALIGNMENT) == len(data)):
+                entry.file_size = len(data)
 
     def _entry_bucket_chain_hash(self, bucket: int) -> bytes:
         idx = self.hash_table_entries[bucket]

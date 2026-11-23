@@ -32,10 +32,9 @@ from . import games_conf, theme
 from .cheats import (
     CheatEntry,
     CheatsError,
-    UnsupportedCodeError,
-    apply_sw_codes,
     extract_product_code,
     list_cheats_for_save,
+    patch_save_file,
 )
 from .history import HistoryEntry, append_history, clear_history, load_history
 from .pfd import PfdConfig, PfdError, PfdFile
@@ -479,11 +478,10 @@ class App(ttk.Frame):
         if self.pf is None or not self.pf.can_rehash_file(target_name):
             messagebox.showerror(
                 "Can't safely patch this file",
-                f"'{target_name}' isn't PARAM.SFO or one of the fixed trophy files -- it needs a "
-                "per-game \"secure file ID\" key this tool doesn't have yet. Patching it would "
-                "leave its stored hash pointing at the OLD content, and the PS3 rejects that as "
-                "corrupted data (error 80029207) instead of accepting the cheat. Refusing to "
-                "apply this one.",
+                f"'{target_name}' needs a per-game \"secure file ID\" key (games.conf) that this "
+                "game doesn't have: without it the file can neither be decrypted (cheat codes "
+                "address its plain text) nor re-hashed (the PS3 would reject the save as "
+                "corrupted, error 80029207). Refusing to apply this one.",
             )
             return
 
@@ -508,15 +506,13 @@ class App(ttk.Frame):
         ):
             return
 
-        target_path = self.save_dir / target_name
         backup_dir = None
         try:
             if do_backup:
                 backup_dir = self._backup_save_dir()
-            patched = apply_sw_codes(target_path.read_bytes(), entry.codes)
-            target_path.write_bytes(patched)
+            patch_save_file(self.pf, self.save_dir, target_name, entry.codes)   # decrypt, patch, re-encrypt
             self._do_resign(self.save_dir, config, action=f"apply_cheat:{entry.name}")
-        except (UnsupportedCodeError, PfdError, SfoError, OSError) as e:
+        except (CheatsError, PfdError, SfoError, OSError) as e:
             messagebox.showerror("Apply cheat failed", str(e))
             return
 

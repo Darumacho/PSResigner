@@ -39,6 +39,10 @@ relying on one would be applied with the wrong byte order -- not
 silently either, since apply_sw_codes doesn't special-case anything
 based on tags it doesn't recognize (there simply aren't any in the 105
 real files this was tested against).
+
+Codes address the file's PLAIN text: a save's data files are encrypted
+on disk, so patch_save_file() decrypts, patches and re-encrypts (see
+PfdFile.decrypt_file_data); the save must then be re-signed.
 """
 
 from __future__ import annotations
@@ -49,6 +53,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .pfd import PfdFile
 
 PATCHES_BASE_URL = "https://raw.githubusercontent.com/bucanero/apollo-patches/main"
 CACHE_DIR = Path.home() / ".ps3save" / "cheats_cache"
@@ -285,6 +293,33 @@ def apply_sw_codes(data: bytes, codes: str) -> bytes:
         raise UnsupportedCodeError(f"Unsupported code type '{code_type}'")
 
     return bytes(buf)
+
+
+def patch_save_file(pf: "PfdFile", save_dir: Path, file_name: str, codes: str) -> bytes:
+    """Applies codes to the plain text of save_dir/file_name and writes it back:
+    decrypt (if PARAM.PFD lists it as encrypted), apply_sw_codes, re-encrypt,
+    then decrypt again to check the round trip. Returns the patched plain text.
+    The caller re-signs the save afterwards (file hashes change). Raises
+    CheatsError (from PfdError) if the file is encrypted but its key is unknown."""
+    from .pfd import PfdError
+
+    path = save_dir / file_name
+    on_disk = path.read_bytes()
+    entry = pf.find_entry(file_name)
+    encrypted = entry is not None and pf.is_encrypted(entry)
+    try:
+        plain = pf.decrypt_file_data(entry, on_disk) if encrypted else on_disk
+        patched = apply_sw_codes(plain, codes)
+        if not encrypted:
+            path.write_bytes(patched)
+            return patched
+        out = pf.encrypt_file_data(entry, patched)
+        if pf.decrypt_file_data(entry, out) != patched:
+            raise CheatsError(f"Re-encrypting '{file_name}' didn't round-trip: file left untouched")
+    except PfdError as e:
+        raise CheatsError(f"Can't decrypt '{file_name}': {e}") from e
+    path.write_bytes(out)
+    return patched
 
 
 def list_cheats_for_save(save_dir: Path) -> list[CheatEntry]:

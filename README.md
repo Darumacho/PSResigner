@@ -36,13 +36,14 @@ SFO's `PARAMS` blob), the same two fields KG's tool patches.
   before committing to a resign.
 - **Community cheat codes** (bucanero/apollo-patches `.savepatch`
   database): browse and apply published Save Wizard-style codes for the
-  loaded save, with the file automatically re-signed afterwards. Code
+  loaded save: the target file is decrypted, patched, re-encrypted and
+  the save re-signed (codes address the file's plain text). Code
   types 0/1/2 (fixed-width write), 3 (increment/decrement), 8 (search)
   and 9 (pointer set/move) are supported; anything else is rejected
   rather than silently mis-applied.
-- **Per-game hash key lookup** (`games.conf`, from the same community
+- **Per-game key lookup** (`games.conf`, from the same community
   database) for games whose non-`PARAM.SFO` files need a per-title
-  "secure file ID" to hash correctly — the GUI shows whether a loaded
+  "secure file ID" to be decrypted and hashed correctly — the GUI shows whether a loaded
   save's game was recognized.
 - **Product code and region detection** — the save's Sony product code
   (e.g. `BCES01741`) is shown, together with a best-effort region/
@@ -104,7 +105,9 @@ The cryptography and file layout are a direct port of the PS3 homebrew
 scene's own tooling, not a reverse-engineering effort from scratch:
 
 - `ps3save/pfd.py` ports flatz's `pfdtool` (GPL) — the `PARAM.PFD`
-  reader, hash verifier and resigner.
+  reader, hash verifier and resigner — plus the protected files'
+  decryption/encryption from Apollo's `pfd.c` (AES with a per-block
+  big-endian counter, keyed by the file's secure file ID).
 - `ps3save/sfo.py` implements the long-documented `PARAM.SFO` container
   format, plus the account/user fields inside its `PARAMS` blob
   (reverse-engineered from `bucanero/apollo-ps3`'s `sfo.c` and

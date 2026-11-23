@@ -473,6 +473,24 @@ Demande : "un peu plus de couleurs" dans l'appli. Proposé un mockup ciblé (pas
 
 Les deux `.exe` sont reconstruits avec ce changement.
 
+## Cheats appliqués sur le contenu déchiffré — fait (23/11/2026)
+
+**Bug** : `on_apply_cheat` appliquait les codes aux octets du fichier tel qu'il est sur le disque, donc **chiffré**. Les fichiers de données d'une sauvegarde (toutes les entrées de `PARAM.PFD` sauf `PARAM.SFO`) sont chiffrés, et les adresses d'un `.savepatch` désignent le contenu en clair (ex. Ninja Gaiden 3, « Ryu Super Health Bar » : `0x8C4` de `SAVE_SYS.DAT`). Résultat : sauvegarde re-signée et acceptée par la console, mais données corrompues pour le jeu. Trouvé en mesurant l'entropie des fichiers de `test/` (~8 bits/octet pour tous). (La note plus haut « aucune étape ne nécessite de déchiffrer le contenu réel » reste vraie pour une re-signature, pas pour un cheat.)
+
+**Algorithme** (lu dans `apollo-ps3`, `source/pfd.c` : `pfd_decrypt_file`/`pfd_encrypt_file`) :
+- clé du fichier = 16 premiers octets de AES-128-CBC-déchiffre(`syscon_manager_key`, IV = 16 premiers octets de la clé d'empreinte de l'entrée, `entry.key`) ;
+- contenu complété de zéros à 16 octets ; bloc `i` : `clair = AES_dec(K, bloc) XOR AES_enc(K, compteur_i)`, chiffrement inverse `bloc = AES_enc(K, clair XOR AES_enc(K, compteur_i))` ;
+- `compteur_i` = `i` sur 8 octets **gros-boutiste** + 8 octets nuls (Apollo l'écrit en natif, sur PowerPC ; en petit-boutiste le résultat reste aléatoire) ;
+- clair = `entry.file_size` octets.
+
+**Fix** :
+- `pfd.py` : `is_encrypted`, `can_decrypt_file`, `decrypt_file_data`, `encrypt_file_data` (flux de compteurs calculé en un seul appel AES, XOR sur entiers : 2 Mo en une fraction de seconde). Fichiers en clair : `PARAM.SFO` et les `TROP*` des trophées.
+- `pfd.py`, `recompute_file_hashes` : la taille d'une entrée chiffrée n'est plus remplacée par la taille sur le disque quand celle-ci n'est que sa forme complétée à 16 octets (sinon un fichier dont la taille réelle n'est pas multiple de 16 aurait gagné du remplissage).
+- `cheats.py` : `patch_save_file(pf, dossier, fichier, codes)` = déchiffrer → `apply_sw_codes` → rechiffrer → re-déchiffrer pour vérifier l'aller-retour → écrire. Un fichier absent de `PARAM.PFD` est patché tel quel.
+- `gui.py` : `on_apply_cheat` passe par `patch_save_file` (re-signature inchangée) ; message de refus mis à jour (sans `secure_file_id`, ni déchiffrement ni empreinte possibles).
+
+**Testé** (headless, sur des copies de `test/`) : aller-retour déchiffrer/rechiffrer **identique octet pour octet** pour les 6 sauvegardes (dont `USR-DATA` de Ratchet & Clank 3, 2 Mo ; contenu en clair à 78-98 % de zéros). Cheat réel « Ryu Super Health Bar » : exactement 8 octets du clair modifiés (`0x8C4`-`0x8CB` : `00…` → `9F…`), un seul bloc chiffré modifié, taille inchangée, toutes les empreintes justes après re-signature. Pas encore vérifié en jeu sur console.
+
 ## Prochaine étape
 
 1. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.
