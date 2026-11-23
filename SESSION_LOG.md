@@ -491,6 +491,16 @@ Les deux `.exe` sont reconstruits avec ce changement.
 
 **Testé** (headless, sur des copies de `test/`) : aller-retour déchiffrer/rechiffrer **identique octet pour octet** pour les 6 sauvegardes (dont `USR-DATA` de Ratchet & Clank 3, 2 Mo ; contenu en clair à 78-98 % de zéros). Cheat réel « Ryu Super Health Bar » : exactement 8 octets du clair modifiés (`0x8C4`-`0x8CB` : `00…` → `9F…`), un seul bloc chiffré modifié, taille inchangée, toutes les empreintes justes après re-signature. Pas encore vérifié en jeu sur console.
 
+## Auto-update étendu à macOS — fait (23/11/2026)
+
+L'utilisateur avait ajouté l'auto-update Windows (`ps3save/update.py`, releases GitHub `Darumacho/PSResigner`, asset `PSResigner.exe`). Adapté au Mac :
+- Asset Mac : `PSResigner-macOS-<arch>.zip` (`platform.machine()`), contenant `PSResigner.app` zippé avec `ditto -c -k --keepParent` (le `zip` classique perd les liens symboliques du bundle). Nouveau `build_mac.sh` : PyInstaller + zip.
+- Installation : téléchargement + extraction (`ditto -x -k`) dans un dossier temporaire avant de quitter, puis script bash détaché (`start_new_session`) qui attend la fin du process, copie le nouveau `.app` à côté de l'ancien, échange les deux par `mv` (restaure l'ancien si le 2e `mv` échoue), retire l'attribut de quarantaine, relance via `open`, nettoie.
+- Refus explicite (OSError → l'interface propose la page des releases) si l'app tourne depuis un emplacement `AppTranslocation` (lancée depuis Téléchargements/une image disque) ou si le dossier parent n'est pas modifiable.
+- `PSResigner.spec` : `CFBundleShortVersionString`/`CFBundleVersion` lus depuis `ps3save/__init__.py` (était figé à `0.1.0`).
+
+**Testé** : build réel + zip, puis installation simulée (`sys.frozen`/`sys.executable` forcés vers une copie du `.app` dans un dossier temporaire, téléchargement en `file://`) : ancien bundle remplacé, aucun résidu, nouvelle version relancée. Pas encore testé avec une vraie release GitHub.
+
 ## Prochaine étape
 
 1. Autres tests sur console réelle avec d'autres jeux (cheats, trophées, changement d'Account ID) — en attente du temps de l'utilisateur.

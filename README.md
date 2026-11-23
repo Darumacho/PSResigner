@@ -99,6 +99,20 @@ or vice versa. On macOS it produces a proper `PSResigner.app` bundle
 (onedir + `BUNDLE`, its own `.icns` icon, no UPX — UPX corrupts signed
 Mach-O binaries) instead of a single onefile executable.
 
+### Auto-update releases
+
+The frozen GUI checks the repo's latest GitHub release at startup and,
+if its tag is newer than `ps3save.__version__`, offers to download and
+install it. The release must carry the asset for each platform:
+
+- Windows: `PSResigner.exe`
+- macOS: `PSResigner-macOS-<arch>.zip` (`arm64` / `x86_64`), built with
+  `./build_mac.sh` — it runs PyInstaller and zips the `.app` with
+  `ditto` (a plain `zip` drops the symlinks inside the bundle).
+
+On macOS the app must live in a writable folder (e.g. `/Applications`),
+not be run straight from Downloads or a disk image.
+
 ## How it works
 
 The cryptography and file layout are a direct port of the PS3 homebrew

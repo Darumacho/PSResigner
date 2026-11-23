@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 
 import tkinterdnd2
 
@@ -28,6 +29,10 @@ tkdnd_datas = [
     for name in (_tkdnd_platform, _tkdnd_platform + "-tcl9")
     if os.path.isdir(os.path.join(_tkdnd_root, name))
 ]
+
+# Single source of truth for the version (also what the auto-updater compares
+# against the GitHub release tag).
+_VERSION = re.search(r'__version__\s*=\s*"([^"]+)"', open(os.path.join('ps3save', '__init__.py'), encoding='utf-8').read()).group(1)
 
 a = Analysis(
     ['run_gui.py'],
@@ -80,7 +85,8 @@ if platform.system() == "Darwin":
         bundle_identifier='fr.free.psresigner',
         info_plist={
             'CFBundleDisplayName': 'PSResigner',
-            'CFBundleShortVersionString': '0.1.0',
+            'CFBundleShortVersionString': _VERSION,
+            'CFBundleVersion': _VERSION,
             'NSHighResolutionCapable': True,
             'NSRequiresAquaSystemAppearance': False,
         },
